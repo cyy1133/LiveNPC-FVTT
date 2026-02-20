@@ -74,6 +74,11 @@ button.primary {
   background: rgba(242, 185, 75, 0.18);
 }
 
+button.danger {
+  border-color: rgba(255, 77, 77, 0.5);
+  background: rgba(255, 77, 77, 0.15);
+}
+
 main {
   padding: 18px 20px 30px;
   display: grid;
@@ -96,6 +101,37 @@ main {
   font-weight: 800;
   color: rgba(255, 255, 255, 0.86);
   letter-spacing: 0.2px;
+}
+
+.tab-strip {
+  padding: 10px 12px;
+}
+
+.main-tabs,
+.sub-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tab-btn,
+.sub-tab-btn {
+  border-radius: 999px;
+  padding: 8px 14px;
+}
+
+.tab-btn.active,
+.sub-tab-btn.active {
+  border-color: rgba(242, 185, 75, 0.45);
+  background: rgba(242, 185, 75, 0.18);
+}
+
+.tab-content {
+  display: none;
+}
+
+.tab-content.active {
+  display: block;
 }
 
 .row {
@@ -239,6 +275,14 @@ main {
   gap: 10px;
 }
 
+.npc-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .npc-meta {
   display: flex;
   flex-direction: column;
@@ -303,6 +347,44 @@ main {
 .npc-card input[type="text"]:focus,
 .md-editor-text:focus {
   border-color: rgba(242, 185, 75, 0.45);
+}
+
+.npc-textarea {
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+  font-family: var(--mono);
+  font-size: 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.22);
+  color: rgba(255, 255, 255, 0.9);
+  padding: 9px 10px;
+  outline: none;
+}
+
+.npc-textarea:focus {
+  border-color: rgba(242, 185, 75, 0.45);
+}
+
+.npc-image-details {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.npc-image-details summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  user-select: none;
+}
+
+.npc-image-body {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
 }
 
 .md-editor-panel {

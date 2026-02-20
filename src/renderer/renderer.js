@@ -47,6 +47,12 @@ function ensureNpcShape(npc, index = 0) {
   out.triggers = out.triggers && typeof out.triggers === "object" ? out.triggers : {};
   if (!Number.isFinite(Number(out.triggers.minFt))) out.triggers.minFt = 2;
   if (!Number.isFinite(Number(out.triggers.maxFt))) out.triggers.maxFt = 30;
+
+  out.image = out.image && typeof out.image === "object" ? out.image : {};
+  out.image.enabled = out.image.enabled === true;
+  const fallbackPrompt = String(out.image.defaultPrompt || out.image.baseTags || "").trim();
+  out.image.defaultPrompt = String(fallbackPrompt || "");
+  out.image.baseTags = String(out.image.baseTags || out.image.defaultPrompt || "");
   return out;
 }
 
@@ -61,6 +67,19 @@ function ensureConfigShape(config) {
   out.npc.sharedDocs = out.npc.sharedDocs && typeof out.npc.sharedDocs === "object" ? out.npc.sharedDocs : {};
   out.npc.sharedDocs.world = String(out.npc.sharedDocs.world || "");
 
+  out.imageGeneration =
+    out.imageGeneration && typeof out.imageGeneration === "object" ? out.imageGeneration : {};
+  out.imageGeneration.webuiUrl = String(out.imageGeneration.webuiUrl || "");
+  if (!Number.isFinite(Number(out.imageGeneration.width)) || Number(out.imageGeneration.width) <= 0) {
+    out.imageGeneration.width = 768;
+  }
+  if (!Number.isFinite(Number(out.imageGeneration.height)) || Number(out.imageGeneration.height) <= 0) {
+    out.imageGeneration.height = 768;
+  }
+  if (!Number.isFinite(Number(out.imageGeneration.timeoutMs)) || Number(out.imageGeneration.timeoutMs) < 15000) {
+    out.imageGeneration.timeoutMs = 120000;
+  }
+
   out.npcs = Array.isArray(out.npcs) ? out.npcs : [];
   if (!out.npcs.length) {
     out.npcs.push({
@@ -70,6 +89,7 @@ function ensureConfigShape(config) {
       actor: { type: "name", value: "NPC" },
       personaDocs: { identity: "", soul: "", behavior: "", battle: "", relations: "", memory: "" },
       triggers: { minFt: 2, maxFt: 30 },
+      image: { enabled: false, defaultPrompt: "", baseTags: "" },
     });
   }
   out.npcs = out.npcs.map((npc, idx) => ensureNpcShape(npc, idx));
@@ -104,6 +124,8 @@ function createNpcTemplate(config) {
   const defaultBattle = String(diana?.personaDocs?.battle || "");
   const defaultMinFt = Number.isFinite(Number(diana?.triggers?.minFt)) ? Number(diana.triggers.minFt) : 2;
   const defaultMaxFt = Number.isFinite(Number(diana?.triggers?.maxFt)) ? Number(diana.triggers.maxFt) : 30;
+  const defaultImagePrompt = String(diana?.image?.defaultPrompt || diana?.image?.baseTags || "");
+  const defaultImageEnabled = diana?.image?.enabled === true;
 
   return ensureNpcShape(
     {
@@ -116,10 +138,15 @@ function createNpcTemplate(config) {
         soul: defaultSoul,
         behavior: "",
         battle: defaultBattle,
-          relations: "",
-          memory: "",
-        },
+        relations: "",
+        memory: "",
+      },
       triggers: { minFt: defaultMinFt, maxFt: defaultMaxFt },
+      image: {
+        enabled: defaultImageEnabled,
+        defaultPrompt: defaultImagePrompt,
+        baseTags: defaultImagePrompt,
+      },
     },
     npcs.length
   );
@@ -227,6 +254,9 @@ async function loadQuickFormFromConfig(config) {
 
   $("f-trace-enabled").checked = config?.runtime?.trace?.enabled !== false;
   $("f-trace-logdir").value = String(config?.runtime?.trace?.logDir || "");
+  $("f-image-webui-url").value = String(config?.imageGeneration?.webuiUrl || "");
+  $("f-image-width").value = String(config?.imageGeneration?.width || 768);
+  $("f-image-height").value = String(config?.imageGeneration?.height || 768);
 
   syncWorldDocInputFromConfig(config);
   updateQuickSetupUi(config);
@@ -288,12 +318,61 @@ function applyQuickFormToConfig(config) {
   config.runtime.trace.includeLlmRaw = config.runtime.trace.includeLlmRaw !== false;
   config.runtime.trace.includeContexts = config.runtime.trace.includeContexts !== false;
 
+  config.imageGeneration = config.imageGeneration || {};
+  config.imageGeneration.webuiUrl = String($("f-image-webui-url")?.value || "").trim();
+  const imageWidth = Number($("f-image-width")?.value);
+  const imageHeight = Number($("f-image-height")?.value);
+  config.imageGeneration.width = Number.isFinite(imageWidth) && imageWidth > 0 ? Math.round(imageWidth) : 768;
+  config.imageGeneration.height = Number.isFinite(imageHeight) && imageHeight > 0 ? Math.round(imageHeight) : 768;
+  const timeoutMs = Number(config.imageGeneration.timeoutMs);
+  config.imageGeneration.timeoutMs = Number.isFinite(timeoutMs) && timeoutMs >= 15000 ? timeoutMs : 120000;
+
   const worldDocInput = $("f-world-doc");
   config.npc.sharedDocs.world = String(worldDocInput?.value || "").trim();
 
   updateQuickSetupUi(config);
   return config;
 }
+
+function setMainTab(tabId) {
+  const wanted = String(tabId || "basic");
+  const buttons = document.querySelectorAll("[data-main-tab-btn]");
+  const panels = document.querySelectorAll("[data-main-tab-content]");
+  buttons.forEach((btn) => {
+    const active = String(btn.dataset.mainTabBtn || "") === wanted;
+    btn.classList.toggle("active", active);
+  });
+  panels.forEach((panel) => {
+    const active = String(panel.dataset.mainTabContent || "") === wanted;
+    panel.classList.toggle("active", active);
+  });
+}
+
+function setBasicTab(tabId) {
+  const wanted = String(tabId || "runtime");
+  const buttons = document.querySelectorAll("[data-basic-tab-btn]");
+  const panels = document.querySelectorAll("[data-basic-tab-content]");
+  buttons.forEach((btn) => {
+    const active = String(btn.dataset.basicTabBtn || "") === wanted;
+    btn.classList.toggle("active", active);
+  });
+  panels.forEach((panel) => {
+    const active = String(panel.dataset.basicTabContent || "") === wanted;
+    panel.classList.toggle("active", active);
+  });
+}
+
+function initTabUi() {
+  document.querySelectorAll("[data-main-tab-btn]").forEach((btn) => {
+    btn.addEventListener("click", () => setMainTab(btn.dataset.mainTabBtn || "basic"));
+  });
+  document.querySelectorAll("[data-basic-tab-btn]").forEach((btn) => {
+    btn.addEventListener("click", () => setBasicTab(btn.dataset.basicTabBtn || "runtime"));
+  });
+  setMainTab("basic");
+  setBasicTab("runtime");
+}
+
 function isSameDocTarget(a, b) {
   if (!a || !b) return false;
   return (
@@ -621,7 +700,7 @@ function renderNpcList(config) {
 
     const sub = document.createElement("div");
     sub.className = "npc-sub";
-    sub.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft`;
+    sub.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
 
     meta.appendChild(name);
     meta.appendChild(sub);
@@ -641,8 +720,34 @@ function renderNpcList(config) {
     toggle.appendChild(cb);
     toggle.appendChild(t);
 
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "danger";
+    deleteBtn.textContent = "Delete NPC";
+    deleteBtn.addEventListener("click", () => {
+      const answer = window.prompt(
+        `'${npc.displayName || npc.id}' NPC를 정말 삭제하시겠습니까?\n삭제하려면 yes 를 입력하세요.`
+      );
+      if (String(answer || "").trim().toLowerCase() !== "yes") return;
+      closeMdEditor({ force: true });
+      config.npcs.splice(i, 1);
+      setConfigEditor(config);
+      renderNpcList(config);
+      appendLog({
+        ts: Date.now(),
+        level: "info",
+        scope: "ui",
+        message: `NPC deleted: id=${npc.id} name=${npc.displayName || npc.id}`,
+      });
+    });
+
+    const headerActions = document.createElement("div");
+    headerActions.className = "npc-header-actions";
+    headerActions.appendChild(toggle);
+    headerActions.appendChild(deleteBtn);
+
     header.appendChild(meta);
-    header.appendChild(toggle);
+    header.appendChild(headerActions);
 
     const controls = document.createElement("div");
     controls.className = "npc-controls";
@@ -669,7 +774,7 @@ function renderNpcList(config) {
         actorInput.value = nextDisplay;
       }
       name.textContent = npc.displayName || npc.id || `npc_${i}`;
-      sub.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft`;
+      sub.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
       setConfigEditor(config);
     });
 
@@ -688,7 +793,7 @@ function renderNpcList(config) {
       npc.actor.type = "name";
       npc.actor.value = String(actorInput.value || "").trim();
       name.textContent = npc.displayName || npc.id || `npc_${i}`;
-      sub.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft`;
+      sub.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
       setConfigEditor(config);
     });
 
@@ -712,7 +817,7 @@ function renderNpcList(config) {
       const parsed = Number(reactInput.value);
       npc.triggers.maxFt = Number.isFinite(parsed) && parsed >= 0 ? parsed : 30;
       reactInput.value = String(npc.triggers.maxFt);
-      sub.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft`;
+      sub.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
       setConfigEditor(config);
     });
 
@@ -745,6 +850,58 @@ function renderNpcList(config) {
       onEdit: () => editTargetWithFallbackPick(battleTarget),
     });
 
+    const imageDetails = document.createElement("details");
+    imageDetails.className = "npc-image-details";
+    if (npc?.image?.enabled || String(npc?.image?.defaultPrompt || npc?.image?.baseTags || "").trim()) {
+      imageDetails.open = true;
+    }
+
+    const imageSummary = document.createElement("summary");
+    imageSummary.textContent = "Image Prompt Settings";
+    imageDetails.appendChild(imageSummary);
+
+    const imageBody = document.createElement("div");
+    imageBody.className = "npc-image-body";
+
+    const imageEnableRow = document.createElement("label");
+    imageEnableRow.className = "npc-toggle";
+    const imageEnableCb = document.createElement("input");
+    imageEnableCb.type = "checkbox";
+    imageEnableCb.checked = npc?.image?.enabled === true;
+    const imageEnableText = document.createElement("span");
+    imageEnableText.textContent = imageEnableCb.checked ? "Image Enabled" : "Image Disabled";
+    imageEnableCb.addEventListener("change", () => {
+      npc.image = npc.image || {};
+      npc.image.enabled = imageEnableCb.checked;
+      imageEnableText.textContent = imageEnableCb.checked ? "Image Enabled" : "Image Disabled";
+      sub.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
+      setConfigEditor(config);
+    });
+    imageEnableRow.appendChild(imageEnableCb);
+    imageEnableRow.appendChild(imageEnableText);
+
+    const imagePromptRow = document.createElement("div");
+    imagePromptRow.className = "npc-doc-row";
+    const imagePromptLabel = document.createElement("label");
+    imagePromptLabel.textContent = "NPC 기본 이미지 프롬프트";
+    const imagePromptArea = document.createElement("textarea");
+    imagePromptArea.className = "npc-textarea";
+    imagePromptArea.placeholder = "e.g. female knight, dark fantasy, dramatic lighting";
+    imagePromptArea.value = String(npc?.image?.defaultPrompt || npc?.image?.baseTags || "");
+    imagePromptArea.addEventListener("change", () => {
+      npc.image = npc.image || {};
+      npc.image.defaultPrompt = String(imagePromptArea.value || "").trim();
+      // Keep baseTags for backward compatibility with older runtime fields.
+      npc.image.baseTags = npc.image.defaultPrompt;
+      setConfigEditor(config);
+    });
+    imagePromptRow.appendChild(imagePromptLabel);
+    imagePromptRow.appendChild(imagePromptArea);
+
+    imageBody.appendChild(imageEnableRow);
+    imageBody.appendChild(imagePromptRow);
+    imageDetails.appendChild(imageBody);
+
     controls.appendChild(displayRow);
     displayRow.appendChild(displayLabel);
     displayRow.appendChild(displayInput);
@@ -752,6 +909,7 @@ function renderNpcList(config) {
     controls.appendChild(reactRow);
     controls.appendChild(soulRow);
     controls.appendChild(battleRow);
+    controls.appendChild(imageDetails);
 
     card.appendChild(header);
     card.appendChild(controls);
@@ -884,6 +1042,7 @@ async function init() {
   const ver = await window.api.getVersion();
   $("app-version").textContent = ver.version || "-";
 
+  initTabUi();
   await loadConfigFromMainProcess();
 
   window.api.onLog((entry) => appendLog(entry));
@@ -1025,6 +1184,30 @@ async function init() {
   const traceDirInput = $("f-trace-logdir");
   if (traceDirInput) {
     traceDirInput.addEventListener("change", () => {
+      currentConfig = applyQuickFormToConfig(currentConfig || {});
+      setConfigEditor(currentConfig);
+    });
+  }
+
+  const imageWebUiInput = $("f-image-webui-url");
+  if (imageWebUiInput) {
+    imageWebUiInput.addEventListener("change", () => {
+      currentConfig = applyQuickFormToConfig(currentConfig || {});
+      setConfigEditor(currentConfig);
+    });
+  }
+
+  const imageWidthInput = $("f-image-width");
+  if (imageWidthInput) {
+    imageWidthInput.addEventListener("change", () => {
+      currentConfig = applyQuickFormToConfig(currentConfig || {});
+      setConfigEditor(currentConfig);
+    });
+  }
+
+  const imageHeightInput = $("f-image-height");
+  if (imageHeightInput) {
+    imageHeightInput.addEventListener("change", () => {
       currentConfig = applyQuickFormToConfig(currentConfig || {});
       setConfigEditor(currentConfig);
     });

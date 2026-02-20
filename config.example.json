@@ -44,6 +44,12 @@
       "logFile": ""
     }
   },
+  "imageGeneration": {
+    "webuiUrl": "http://127.0.0.1:7860",
+    "width": 768,
+    "height": 768,
+    "timeoutMs": 120000
+  },
   "npc": {
     "difficultTerrainMultiplier": 2,
     "defaultNpcId": "diana",
@@ -54,9 +60,12 @@
   "npcs": [
     {
       "id": "diana",
-      "displayName": "양치기 디아나",
+      "displayName": "Diana",
       "enabled": true,
-      "actor": { "type": "name", "value": "양치기 디아나" },
+      "actor": {
+        "type": "name",
+        "value": "Diana"
+      },
       "personaDocs": {
         "identity": "",
         "soul": ".\\persona-defaults\\npc.md",
@@ -65,7 +74,15 @@
         "relations": "",
         "memory": ""
       },
-      "triggers": { "minFt": 2, "maxFt": 30 }
+      "triggers": {
+        "minFt": 2,
+        "maxFt": 30
+      },
+      "image": {
+        "enabled": false,
+        "defaultPrompt": "female knight, dark fantasy, dramatic lighting, full body",
+        "baseTags": "female knight, dark fantasy, dramatic lighting, full body"
+      }
     }
   ]
 }

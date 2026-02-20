@@ -34,7 +34,14 @@
         <div class="hint">Save config first, then run Diagnostics before Start.</div>
       </section>
 
-      <section class="panel">
+      <section class="panel tab-strip">
+        <div class="main-tabs">
+          <button class="tab-btn active" type="button" data-main-tab-btn="basic">기본 설정</button>
+          <button class="tab-btn" type="button" data-main-tab-btn="npc">NPC 설정</button>
+        </div>
+      </section>
+
+      <section class="panel tab-content active" data-main-tab-content="basic">
         <div class="row">
           <h2 style="margin: 0">Quick Setup</h2>
           <div class="row-actions">
@@ -43,90 +50,117 @@
           </div>
         </div>
 
-        <div class="form-grid">
-          <div class="field">
-            <label for="f-discord-token">Discord Bot Token</label>
-            <input id="f-discord-token" type="password" placeholder="Discord Bot Token" />
-          </div>
-          <div class="field">
-            <label for="f-discord-channel">Discord Channel</label>
-            <input id="f-discord-channel" type="text" placeholder="aibot" />
-          </div>
-          <div class="field checkbox">
-            <label>
-              <input id="f-discord-mention" type="checkbox" />
-              Require mention to reply
-            </label>
-          </div>
+        <div class="sub-tabs">
+          <button class="sub-tab-btn active" type="button" data-basic-tab-btn="runtime">Runtime</button>
+          <button class="sub-tab-btn" type="button" data-basic-tab-btn="image">Image</button>
+        </div>
 
-          <div class="field">
-            <label for="f-fvtt-url">FVTT URL</label>
-            <input id="f-fvtt-url" type="text" placeholder="https://your-foundry.example" />
-          </div>
-          <div class="field">
-            <label for="f-fvtt-user">FVTT Username</label>
-            <input id="f-fvtt-user" type="text" placeholder="username" />
-          </div>
-          <div class="field">
-            <label for="f-fvtt-pass">FVTT Password</label>
-            <input id="f-fvtt-pass" type="password" placeholder="password" />
-          </div>
-          <div class="field checkbox">
-            <label>
-              <input id="f-fvtt-headless" type="checkbox" />
-              Headless browser
-            </label>
-          </div>
+        <div class="tab-content active" data-basic-tab-content="runtime">
+          <div class="form-grid">
+            <div class="field">
+              <label for="f-discord-token">Discord Bot Token</label>
+              <input id="f-discord-token" type="password" placeholder="Discord Bot Token" />
+            </div>
+            <div class="field">
+              <label for="f-discord-channel">Discord Channel</label>
+              <input id="f-discord-channel" type="text" placeholder="aibot" />
+            </div>
+            <div class="field checkbox">
+              <label>
+                <input id="f-discord-mention" type="checkbox" />
+                Require mention to reply
+              </label>
+            </div>
 
-          <div class="field">
-            <label for="f-llm-provider">LLM Provider</label>
-            <select id="f-llm-provider">
-              <option value="codex-cli">Codex CLI (ChatGPT subscription)</option>
-              <option value="openai-oauth">OpenAI OAuth</option>
-              <option value="openai-api-key">OpenAI API Key</option>
-            </select>
-          </div>
-          <div class="field">
-            <label id="f-model-label" for="f-openai-model">Model</label>
-            <input id="f-openai-model" type="text" placeholder="gpt-5.3-codex" />
-          </div>
-          <div class="field" id="f-openai-key-wrap">
-            <label for="f-openai-key">OpenAI API Key</label>
-            <input id="f-openai-key" type="password" placeholder="sk-..." />
-          </div>
-          <div class="field" id="f-codex-bin-wrap">
-            <label for="f-codex-bin">Codex CLI Path (optional)</label>
-            <input id="f-codex-bin" type="text" placeholder="codex.exe or full path" />
-          </div>
-          <div class="field checkbox">
-            <label>
-              <input id="f-trace-enabled" type="checkbox" />
-              Enable full trace log (Discord/LLM/FVTT payloads)
-            </label>
-          </div>
-          <div class="field">
-            <label for="f-trace-logdir">Trace Log Folder (optional)</label>
-            <input id="f-trace-logdir" type="text" placeholder="default: userData/logs" />
-          </div>
-          <div class="field">
-            <label>Login Status</label>
-            <div class="oauth-row">
-              <div class="oauth-status" id="oauth-status">-</div>
-              <button id="btn-oauth-inline">Codex Login</button>
+            <div class="field">
+              <label for="f-fvtt-url">FVTT URL</label>
+              <input id="f-fvtt-url" type="text" placeholder="https://your-foundry.example" />
+            </div>
+            <div class="field">
+              <label for="f-fvtt-user">FVTT Username</label>
+              <input id="f-fvtt-user" type="text" placeholder="username" />
+            </div>
+            <div class="field">
+              <label for="f-fvtt-pass">FVTT Password</label>
+              <input id="f-fvtt-pass" type="password" placeholder="password" />
+            </div>
+            <div class="field checkbox">
+              <label>
+                <input id="f-fvtt-headless" type="checkbox" />
+                Headless browser
+              </label>
+            </div>
+
+            <div class="field">
+              <label for="f-llm-provider">LLM Provider</label>
+              <select id="f-llm-provider">
+                <option value="codex-cli">Codex CLI (ChatGPT subscription)</option>
+                <option value="openai-oauth">OpenAI OAuth</option>
+                <option value="openai-api-key">OpenAI API Key</option>
+              </select>
+            </div>
+            <div class="field">
+              <label id="f-model-label" for="f-openai-model">Model</label>
+              <input id="f-openai-model" type="text" placeholder="gpt-5.3-codex" />
+            </div>
+            <div class="field" id="f-openai-key-wrap">
+              <label for="f-openai-key">OpenAI API Key</label>
+              <input id="f-openai-key" type="password" placeholder="sk-..." />
+            </div>
+            <div class="field" id="f-codex-bin-wrap">
+              <label for="f-codex-bin">Codex CLI Path (optional)</label>
+              <input id="f-codex-bin" type="text" placeholder="codex.exe or full path" />
+            </div>
+            <div class="field checkbox">
+              <label>
+                <input id="f-trace-enabled" type="checkbox" />
+                Enable full trace log (Discord/LLM/FVTT payloads)
+              </label>
+            </div>
+            <div class="field">
+              <label for="f-trace-logdir">Trace Log Folder (optional)</label>
+              <input id="f-trace-logdir" type="text" placeholder="default: userData/logs" />
+            </div>
+            <div class="field">
+              <label>Login Status</label>
+              <div class="oauth-row">
+                <div class="oauth-status" id="oauth-status">-</div>
+                <button id="btn-oauth-inline">Codex Login</button>
+              </div>
             </div>
           </div>
+
+          <div class="hint">
+            Recommended: click <code>Install Prerequisites</code> once on first run.
+            For Codex CLI, login is completed in a terminal window.
+          </div>
+          <div class="hint">
+            Full trace files are saved as <code>runtime-trace-*.ndjson</code>. Start log에서 실제 경로를 확인하세요.
+          </div>
         </div>
 
-        <div class="hint">
-          Recommended: click <code>Install Prerequisites</code> once on first run.
-          For Codex CLI, login is completed in a terminal window.
-        </div>
-        <div class="hint">
-          Full trace files are saved as <code>runtime-trace-*.ndjson</code>. Start log에서 실제 경로를 확인하세요.
+        <div class="tab-content" data-basic-tab-content="image">
+          <div class="form-grid">
+            <div class="field">
+              <label for="f-image-webui-url">Stable Diffusion WebUI URL</label>
+              <input id="f-image-webui-url" type="text" placeholder="http://127.0.0.1:7860" />
+            </div>
+            <div class="field">
+              <label for="f-image-width">Image Width (px)</label>
+              <input id="f-image-width" type="number" min="64" step="1" placeholder="768" />
+            </div>
+            <div class="field">
+              <label for="f-image-height">Image Height (px)</label>
+              <input id="f-image-height" type="number" min="64" step="1" placeholder="768" />
+            </div>
+          </div>
+          <div class="hint">
+            NPC별 이미지 생성 허용은 NPC 탭에서 설정합니다. URL이 비어 있으면 이미지 생성이 비활성화됩니다.
+          </div>
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel tab-content" data-main-tab-content="npc">
         <div class="row">
           <h2 style="margin: 0">NPC</h2>
           <div class="row-actions">

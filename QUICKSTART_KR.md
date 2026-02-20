@@ -53,13 +53,25 @@
 
 - Discord의 `#aibot` 채널에서 봇 멘션 후 대화
 - 멀티 NPC일 때는 이름 포함 호출 권장
+- 설정 화면은 `기본 설정` / `NPC 설정` 탭으로 분리되어 있습니다.
+- `기본 설정 > Image` 탭에서 SD WebUI URL 및 이미지 크기(px)를 설정할 수 있습니다.
 - NPC 패널의 `Add NPC` 버튼으로 다중 NPC를 추가할 수 있습니다.
+- 추가된 각 NPC 카드에는 `Delete NPC` 버튼이 있으며, 삭제 시 `yes` 입력 확인이 필요합니다.
 - NPC 패널에서 `Save NPC` / `Reload NPC`로 NPC 설정만 별도로 저장/다시불러오기 할 수 있습니다.
 - 각 NPC의 `React Distance <= (ft)`로 반응 거리 상한을 설정할 수 있습니다.
   - 소스 토큰 거리가 이 값보다 멀면 해당 NPC는 LLM 호출을 생략합니다.
   - 소스 토큰(발화자)을 찾지 못해도 해당 NPC는 반응을 생략합니다.
   - `0`이면 거리 게이트를 끕니다.
+- 각 NPC 카드의 `Image Prompt Settings`(접기/펼치기)에서:
+  - 이미지 생성 허용 on/off
+  - NPC 기본 이미지 프롬프트(default prompt)
+    를 개별 설정할 수 있습니다.
 - FVTT 인바운드는 런타임 시작 시점 이후 메시지만 반응합니다.
+
+## 4-2) 소스 원클릭 빌드
+
+- 루트 폴더에서 `build-oneclick.bat` 실행
+- 내부적으로 `npm run dist`를 수행하여 설치 파일(`dist/*.exe`)을 생성합니다.
 
 ## 4-1) 전체 왕복 로그 보기 (Discord <-> LLM <-> FVTT)
 

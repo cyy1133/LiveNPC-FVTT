@@ -27,6 +27,8 @@ const FALLBACK_BATTLE_MD = `# Battle Pattern (Default)
 5. Avoid wasting turns; always end with the most effective valid action.
 `;
 
+const DEFAULT_DIANA_IMAGE_TAGS = "female knight, dark fantasy, dramatic lighting, full body";
+
 function getDefaultConfigPath(appDataDir) {
   return path.join(String(appDataDir || "."), "config.json");
 }
@@ -127,6 +129,12 @@ function defaultConfig(defaultDocs = {}) {
         logFile: "",
       },
     },
+    imageGeneration: {
+      webuiUrl: "",
+      width: 768,
+      height: 768,
+      timeoutMs: 120_000,
+    },
     npc: {
       difficultTerrainMultiplier: 2,
       defaultNpcId: "diana",
@@ -137,9 +145,9 @@ function defaultConfig(defaultDocs = {}) {
     npcs: [
       {
         id: "diana",
-        displayName: "양치기 디아나",
+        displayName: "Diana",
         enabled: true,
-        actor: { type: "name", value: "양치기 디아나" },
+        actor: { type: "name", value: "Diana" },
         personaDocs: {
           identity: "",
           soul: String(defaultDocs.npc || ""),
@@ -149,6 +157,11 @@ function defaultConfig(defaultDocs = {}) {
           memory: "",
         },
         triggers: { minFt: 2, maxFt: 30 },
+        image: {
+          enabled: false,
+          defaultPrompt: DEFAULT_DIANA_IMAGE_TAGS,
+          baseTags: DEFAULT_DIANA_IMAGE_TAGS,
+        },
       },
     ],
   };
@@ -176,6 +189,55 @@ function mergeDefaults(base, override) {
   return out;
 }
 
+function normalizeImageGeneration(out) {
+  out.imageGeneration = isPlainObject(out.imageGeneration) ? out.imageGeneration : {};
+  out.imageGeneration.webuiUrl = String(out.imageGeneration.webuiUrl || "");
+
+  const width = Number(out.imageGeneration.width);
+  out.imageGeneration.width = Number.isFinite(width) && width > 0 ? Math.round(width) : 768;
+
+  const height = Number(out.imageGeneration.height);
+  out.imageGeneration.height = Number.isFinite(height) && height > 0 ? Math.round(height) : 768;
+
+  const timeoutMs = Number(out.imageGeneration.timeoutMs);
+  out.imageGeneration.timeoutMs = Number.isFinite(timeoutMs) && timeoutMs >= 30_000 ? Math.round(timeoutMs) : 120_000;
+}
+
+function normalizeNpcShape(npc, { defaultDocs, isDiana = false, fallbackName = "NPC" } = {}) {
+  const out = isPlainObject(npc) ? npc : {};
+
+  out.id = String(out.id || (isDiana ? "diana" : "npc"));
+  out.displayName = String(out.displayName || (isDiana ? "Diana" : fallbackName || out.id));
+  out.enabled = out.enabled !== false;
+
+  out.actor = isPlainObject(out.actor) ? out.actor : {};
+  out.actor.type = "name";
+  out.actor.value = String(out.actor.value || out.displayName || "");
+
+  out.personaDocs = isPlainObject(out.personaDocs) ? out.personaDocs : {};
+  out.personaDocs.identity = String(out.personaDocs.identity || "");
+  out.personaDocs.soul = String(out.personaDocs.soul || (isDiana ? defaultDocs.npc || "" : ""));
+  out.personaDocs.behavior = String(out.personaDocs.behavior || "");
+  out.personaDocs.battle = String(out.personaDocs.battle || (isDiana ? defaultDocs.battle || "" : ""));
+  out.personaDocs.relations = String(out.personaDocs.relations || "");
+  out.personaDocs.memory = String(out.personaDocs.memory || "");
+
+  out.triggers = isPlainObject(out.triggers) ? out.triggers : {};
+  const minFt = Number(out.triggers.minFt);
+  const maxFt = Number(out.triggers.maxFt);
+  out.triggers.minFt = Number.isFinite(minFt) ? minFt : 2;
+  out.triggers.maxFt = Number.isFinite(maxFt) ? maxFt : 30;
+
+  out.image = isPlainObject(out.image) ? out.image : {};
+  out.image.enabled = out.image.enabled === true;
+  const fallbackPrompt = String(out.image.defaultPrompt || out.image.baseTags || "").trim();
+  out.image.defaultPrompt = String(fallbackPrompt || (isDiana ? DEFAULT_DIANA_IMAGE_TAGS : ""));
+  // Keep baseTags for backward compatibility with older configs/runtimes.
+  out.image.baseTags = String(out.image.baseTags || out.image.defaultPrompt || "");
+
+  return out;
+}
+
 function applyPersonaDocDefaults(config, defaultDocs = {}) {
   const out = isPlainObject(config) ? config : {};
 
@@ -185,29 +247,39 @@ function applyPersonaDocDefaults(config, defaultDocs = {}) {
     out.npc.sharedDocs.world = String(defaultDocs.world || "");
   }
 
-  const npcs = Array.isArray(out.npcs) ? out.npcs : [];
-  const diana =
-    npcs.find((n) => String(n?.id || "").trim().toLowerCase() === "diana") ||
-    npcs.find((n) => String(n?.displayName || "").includes("디아나"));
-  if (diana && isPlainObject(diana)) {
-    diana.personaDocs = isPlainObject(diana.personaDocs) ? diana.personaDocs : {};
-    if (!String(diana.personaDocs.soul || "").trim()) {
-      diana.personaDocs.soul = String(defaultDocs.npc || "");
-    }
-    if (!String(diana.personaDocs.battle || "").trim()) {
-      diana.personaDocs.battle = String(defaultDocs.battle || "");
-    }
-    diana.displayName = String(diana.displayName || "양치기 디아나");
-    diana.actor = isPlainObject(diana.actor) ? diana.actor : {};
-    diana.actor.type = "name";
-    if (!String(diana.actor.value || "").trim()) {
-      diana.actor.value = String(diana.displayName || "양치기 디아나");
-    }
+  normalizeImageGeneration(out);
+
+  out.npcs = Array.isArray(out.npcs) ? out.npcs : [];
+  if (!out.npcs.length) {
+    out.npcs.push({ id: "diana" });
   }
 
-  if (!String(out.npc.defaultNpcId || "").trim() && diana) {
-    out.npc.defaultNpcId = String(diana.id || "diana");
+  let hasDiana = false;
+  out.npcs = out.npcs.map((npc, index) => {
+    const id = String(npc?.id || "").trim().toLowerCase();
+    const isDiana = id === "diana";
+    if (isDiana) hasDiana = true;
+    const fallbackName = isDiana ? "Diana" : `NPC ${index + 1}`;
+    return normalizeNpcShape(npc, { defaultDocs, isDiana, fallbackName });
+  });
+
+  if (!hasDiana) {
+    out.npcs.unshift(
+      normalizeNpcShape(
+        {
+          id: "diana",
+          displayName: "Diana",
+          actor: { type: "name", value: "Diana" },
+        },
+        { defaultDocs, isDiana: true, fallbackName: "Diana" }
+      )
+    );
   }
+
+  if (!String(out.npc.defaultNpcId || "").trim()) {
+    out.npc.defaultNpcId = "diana";
+  }
+
   return out;
 }
 

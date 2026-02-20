@@ -46,6 +46,68 @@ function ensureArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function clampInt(value, fallback, min = 64, max = 4096) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function normalizeNpcImageGenerationState({ config, npc } = {}) {
+  const globalCfg = isPlainObject(config?.imageGeneration) ? config.imageGeneration : {};
+  const npcImage = isPlainObject(npc?.image) ? npc.image : {};
+
+  const webuiUrl = String(globalCfg.webuiUrl || "").trim().replace(/\/+$/, "");
+  const width = clampInt(globalCfg.width, 768, 64, 4096);
+  const height = clampInt(globalCfg.height, 768, 64, 4096);
+  const timeoutMs = clampInt(globalCfg.timeoutMs, 120000, 15000, 300000);
+  const defaultPrompt = String(npcImage.defaultPrompt || npcImage.baseTags || "").trim();
+  const npcEnabled = npcImage.enabled === true;
+  const configured = Boolean(webuiUrl);
+  const enabled = configured && npcEnabled;
+
+  return {
+    configured,
+    enabled,
+    webuiUrl,
+    width,
+    height,
+    timeoutMs,
+    defaultPrompt,
+    // Keep alias for older code paths.
+    baseTags: defaultPrompt,
+    npcEnabled,
+  };
+}
+
+function normalizeImagePromptText(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .replace(/\u0000/g, "")
+    .trim();
+}
+
+function buildImagePrompt({ npcName, baseTags, extraPrompt }) {
+  const chunks = [];
+  const base = normalizeImagePromptText(baseTags);
+  const extra = normalizeImagePromptText(extraPrompt);
+  if (base) chunks.push(base);
+  if (extra) chunks.push(extra);
+  if (!chunks.length) {
+    chunks.push(`${String(npcName || "NPC")} portrait, fantasy style, cinematic lighting`);
+  }
+  return chunks.join(", ");
+}
+
+function escapeHtml(text) {
+  const s = String(text || "");
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function pad2(n) {
   return String(Number(n) || 0).padStart(2, "0");
 }
@@ -919,6 +981,25 @@ function normalizeActionTag(plan, depth = 0) {
     };
   }
 
+  if (type === "image" || type === "img" || type === "sdimage" || type === "generateimage") {
+    const prompt =
+      String(
+        plan.prompt ||
+          plan.extraPrompt ||
+          plan.promptText ||
+          plan.tags ||
+          plan.text ||
+          plan.description ||
+          ""
+      ).trim() || "";
+    const reason = String(plan.reason || plan.trigger || plan.context || "").trim() || "";
+    return {
+      type: "image",
+      prompt,
+      reason,
+    };
+  }
+
   return { type: "none" };
 }
 
@@ -1067,6 +1148,18 @@ function actionTagToIntentSteps(actionTag) {
       args.centerY = Number(aoe.centerY);
     }
     return [{ type: "aoe", args }];
+  }
+
+  if (type === "image") {
+    return [
+      {
+        type: "image",
+        args: {
+          prompt: String(action.prompt || "").trim(),
+          reason: String(action.reason || "").trim(),
+        },
+      },
+    ];
   }
 
   return [];
@@ -1260,9 +1353,14 @@ function buildNpcPrompt({
   fvttSceneContext,
   fvttActorSheet,
   mentionedSceneTokens = [],
+  imageGeneration = null,
 }) {
   const npcName = String(npc?.displayName || npc?.id || "NPC");
   const modeText = fvttReady ? "FVTT connected (can act in-world)" : "FVTT offline (chat only)";
+  const imageState =
+    imageGeneration && typeof imageGeneration === "object"
+      ? imageGeneration
+      : normalizeNpcImageGenerationState({ config: null, npc });
 
   const contextLines = ensureArray(fvttChatContext)
     .slice(-10)
@@ -1290,14 +1388,14 @@ function buildNpcPrompt({
     "{",
     '  \"replyText\": string,',
     '  \"intent\": {',
-    '    \"type\": \"none\" | \"say\" | \"action\" | \"tokenaction\" | \"aoe\" | \"move\" | \"tokenmove\" | \"targetset\" | \"targetclear\" | \"inspect\" | \"plan\",',
+    '    \"type\": \"none\" | \"say\" | \"action\" | \"tokenaction\" | \"aoe\" | \"move\" | \"tokenmove\" | \"targetset\" | \"targetclear\" | \"inspect\" | \"image\" | \"plan\",',
     '    \"args\": object',
     "  }",
     "}",
     "",
     "FVTT action tag protocol (PRIMARY when FVTT connected):",
     "- Put natural in-character narration in replyText first.",
-    "- For any in-world action (target/move/action/aoe), append FVTT_ACTION tags at the END of replyText.",
+    "- For any in-world action (target/move/action/aoe/image), append FVTT_ACTION tags at the END of replyText.",
     '- Tag format: [[FVTT_ACTION {...}]]',
     "- Runtime executes tags exactly in queue order.",
     "- Do not rely on runtime to invent extra steps. Provide explicit steps in the tags.",
@@ -1320,6 +1418,7 @@ function buildNpcPrompt({
     "- If you need awareness before acting, include inspect step first (context/sheet).",
     "- You must use actor resources below (spell slots, prepared spells, inventory, actions).",
     "- Never choose leveled spells with empty slots. Prefer cantrip/weapon if slots are depleted.",
+    "- Use image intent/tag only if image generation is enabled in the context section below.",
     "",
     "Supported intents:",
     "- say: { text }",
@@ -1331,6 +1430,7 @@ function buildNpcPrompt({
     "- action: { actionName: string, targetTokenRef?: string }",
     "- tokenaction: { tokenRef: string, actionName: string, targetTokenRef?: string }",
     "- aoe: { actionName: string, shape: \"circle|cone|line\", radiusFt?: number, lengthFt?: number, widthFt?: number, angleDeg?: number, centerTokenRef?: string, direction?: string, includeSelf?: boolean, includeHostileOnly?: boolean, placeTemplate?: boolean, centerX?: number, centerY?: number }",
+    "- image: { prompt?: string, reason?: string }",
     "- plan: { steps: [ {type,args}, ... ] }",
     "",
   ].join("\n");
@@ -1346,6 +1446,30 @@ function buildNpcPrompt({
 
   if (personaText) {
     parts.push("Persona:", personaText, "");
+  }
+
+  if (imageState.enabled) {
+    parts.push(
+      "Image generation:",
+      `- SD WebUI enabled for this NPC (size=${imageState.width}x${imageState.height})`,
+      `- Default prompt: ${imageState.defaultPrompt || "(none)"}`,
+      "- Use image tags sparingly (major emotion shift, battle start, dramatic scene transition).",
+      '- Example: [[FVTT_ACTION {"type":"image","prompt":"grim expression, rain, close-up portrait","reason":"battle start"}]]',
+      "- At most one image tag per reply unless user explicitly asks for multiple images.",
+      ""
+    );
+  } else if (imageState.configured) {
+    parts.push(
+      "Image generation:",
+      "- SD WebUI is configured globally but disabled for this NPC. Do not emit image tags or image intent.",
+      ""
+    );
+  } else {
+    parts.push(
+      "Image generation:",
+      "- SD WebUI is not configured. Do not emit image tags or image intent.",
+      ""
+    );
   }
 
   if (fvttReady && contextLines.length) {
@@ -1447,6 +1571,7 @@ function normalizeIntent(output) {
     "targetset",
     "targetclear",
     "inspect",
+    "image",
     "plan",
   ]);
   const normType = allowed.has(type) ? type : "none";
@@ -1480,6 +1605,10 @@ function normalizeIntent(output) {
               if (typeof step?.placeTemplate === "boolean") out.placeTemplate = step.placeTemplate;
               if (Number.isFinite(Number(step?.centerX))) out.centerX = Number(step.centerX);
               if (Number.isFinite(Number(step?.centerY))) out.centerY = Number(step.centerY);
+              if (step?.prompt) out.prompt = String(step.prompt);
+              if (step?.extraPrompt) out.prompt = String(step.extraPrompt);
+              if (step?.reason) out.reason = String(step.reason);
+              if (step?.trigger) out.reason = String(step.trigger);
               return out;
             })();
         if (!allowed.has(stepType) || stepType === "plan" || stepType === "none") return null;
@@ -1900,6 +2029,7 @@ class AppRuntime {
       fvttSceneContext,
       fvttActorSheet,
       mentionedSceneTokens,
+      imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
     });
 
     let replyText = "";
@@ -2028,6 +2158,7 @@ class AppRuntime {
       actor: n.actor,
       docs: n.personaDocs,
       triggers: n.triggers,
+      image: n.image,
     }));
 
     // Discord diag
@@ -2514,6 +2645,7 @@ class AppRuntime {
               "targetset",
               "targetclear",
               "aoe",
+              "image",
             ].includes(String(step?.type || ""))
           )
           .slice(0, 8);
@@ -2575,9 +2707,18 @@ class AppRuntime {
         args: isPlainObject(step?.args) ? step.args : {},
       }))
       .filter((step) =>
-        ["say", "inspect", "move", "tokenmove", "action", "tokenaction", "targetset", "targetclear", "aoe"].includes(
-          step.type
-        )
+        [
+          "say",
+          "inspect",
+          "move",
+          "tokenmove",
+          "action",
+          "tokenaction",
+          "targetset",
+          "targetclear",
+          "aoe",
+          "image",
+        ].includes(step.type)
       )
       .slice(0, 8);
   }
@@ -2765,6 +2906,7 @@ class AppRuntime {
       fvttSceneContext,
       fvttActorSheet,
       mentionedSceneTokens,
+      imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
     });
 
     try {
@@ -2964,6 +3106,120 @@ class AppRuntime {
     }
   }
 
+  async _executeNpcImageIntent({ config, npc, args, strict = false }) {
+    const state = normalizeNpcImageGenerationState({ config, npc });
+    const npcName = String(npc?.displayName || npc?.id || "NPC");
+    if (!state.enabled) {
+      const reason = state.configured
+        ? "image generation disabled for this NPC"
+        : "image generation not configured (missing SD WebUI URL)";
+      if (strict) throw new Error(reason);
+      this.log.info("image", `skip (${npcName}): ${reason}`);
+      this._trace("sd.image.skip", {
+        npcId: npc?.id || "",
+        npcName,
+        reason,
+      });
+      return { ok: false, skipped: true, reason };
+    }
+
+    const extraPrompt = normalizeImagePromptText(
+      args?.prompt || args?.extraPrompt || args?.promptText || args?.tags || args?.text || ""
+    );
+    const reasonText = normalizeImagePromptText(args?.reason || args?.trigger || args?.context || "");
+    const finalPrompt = buildImagePrompt({
+      npcName,
+      baseTags: state.defaultPrompt,
+      extraPrompt,
+    });
+    const endpoint = `${state.webuiUrl}/sdapi/v1/txt2img`;
+
+    this._trace("sd.image.request", {
+      npcId: npc?.id || "",
+      npcName,
+      endpoint,
+      width: state.width,
+      height: state.height,
+      reason: reasonText,
+      prompt: compact(finalPrompt, 280),
+    });
+
+    const controller = new AbortController();
+    const timeoutHandle = setTimeout(() => controller.abort(), state.timeoutMs);
+
+    let response = null;
+    try {
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          prompt: finalPrompt,
+          width: state.width,
+          height: state.height,
+          batch_size: 1,
+          n_iter: 1,
+        }),
+        signal: controller.signal,
+      });
+    } catch (e) {
+      const message = e?.name === "AbortError" ? "SD WebUI request timed out" : String(e?.message || e);
+      throw new Error(`image generation request failed: ${message}`);
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
+
+    if (!response?.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(
+        `image generation failed: HTTP ${Number(response.status || 0)} ${compact(body || response.statusText || "", 220)}`
+      );
+    }
+
+    const data = await response.json().catch(() => null);
+    const rawImage = Array.isArray(data?.images) && data.images.length > 0 ? String(data.images[0] || "") : "";
+    if (!rawImage.trim()) {
+      throw new Error("image generation failed: SD WebUI returned no images");
+    }
+
+    const base64 = rawImage.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "").trim();
+    if (!base64) {
+      throw new Error("image generation failed: empty image payload");
+    }
+    const dataUrl = `data:image/png;base64,${base64}`;
+    const caption = reasonText ? `${npcName} - ${reasonText}` : `${npcName} image`;
+    const html = [
+      `<div class=\"npc-image-message\">`,
+      `<p><strong>${escapeHtml(caption)}</strong></p>`,
+      `<p><small>${escapeHtml(compact(finalPrompt, 220))}</small></p>`,
+      `<img src=\"${dataUrl}\" alt=\"${escapeHtml(caption)}\" style=\"max-width:100%;height:auto;border-radius:8px;\" />`,
+      `</div>`,
+    ].join("");
+
+    const speak = await this._withNpcActor(npc, () => this.fvtt.speakAsActor(html));
+    if (!speak?.ok) {
+      throw new Error(String(speak?.error || "failed to post image to FVTT chat"));
+    }
+
+    this.log.info("image", `generated: ${npcName} ${state.width}x${state.height}`);
+    this._trace("sd.image.generated", {
+      npcId: npc?.id || "",
+      npcName,
+      width: state.width,
+      height: state.height,
+      reason: reasonText,
+      prompt: compact(finalPrompt, 280),
+      messageId: String(speak?.messageId || ""),
+    });
+    return {
+      ok: true,
+      width: state.width,
+      height: state.height,
+      reason: reasonText,
+      prompt: finalPrompt,
+      messageId: String(speak?.messageId || ""),
+    };
+  }
+
   async _executeNpcIntent({ config, npc, intent, strict = false }) {
     const type = String(intent?.type || "none").toLowerCase();
     const args = isPlainObject(intent?.args) ? intent.args : {};
@@ -2996,6 +3252,11 @@ class AppRuntime {
         this._trace("fvtt.inspect.result", { npcId: npc?.id || "", what, result: log });
         return;
       }
+      return;
+    }
+
+    if (type === "image") {
+      await this._executeNpcImageIntent({ config, npc, args, strict });
       return;
     }
 
