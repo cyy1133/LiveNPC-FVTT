@@ -37,6 +37,13 @@ node runtime/cli.js run
   - Windows: `%APPDATA%\\fvtt-ai-runtime\\config.json`
   - You can still override with `--config <path>`
 
+### CLI helper bat files (Windows)
+
+- `cli-start.bat`: start runtime in background
+- `cli-stop.bat`: stop runtime process
+- `cli-status.bat`: show running status
+- `cli-restart.bat`: stop + start
+
 ## Build installer
 
 ```powershell

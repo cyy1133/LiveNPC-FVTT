@@ -82,6 +82,15 @@
   - `node runtime/cli.js run`
 - 다른 설정 파일을 쓰고 싶을 때만 `--config <path>`를 지정하면 됩니다.
 
+## 4-4) CLI 켜기/끄기 (배치파일)
+
+- 루트 폴더에서 아래 배치파일을 사용하면 됩니다.
+  - 시작: `cli-start.bat`
+  - 중지: `cli-stop.bat`
+  - 상태 확인: `cli-status.bat`
+  - 재시작: `cli-restart.bat`
+- 모두 `%APPDATA%\\fvtt-ai-runtime\\config.json`을 기준으로 동작합니다.
+
 ## 4-1) 전체 왕복 로그 보기 (Discord <-> LLM <-> FVTT)
 
 - Quick Setup에서 `Enable full trace log` 체크
