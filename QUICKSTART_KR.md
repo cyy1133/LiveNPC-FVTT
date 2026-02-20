@@ -73,6 +73,15 @@
 - 루트 폴더에서 `build-oneclick.bat` 실행
 - 내부적으로 `npm run dist`를 수행하여 설치 파일(`dist/*.exe`)을 생성합니다.
 
+## 4-3) CLI 설정 파일 경로 (EXE와 동일)
+
+- 현재 버전부터 CLI 기본 설정 경로도 EXE와 동일합니다.
+  - Windows: `%APPDATA%\\fvtt-ai-runtime\\config.json`
+- 따라서 아래처럼 `--config` 없이 실행해도 EXE에서 저장한 설정을 그대로 사용합니다.
+  - `node runtime/cli.js diagnose`
+  - `node runtime/cli.js run`
+- 다른 설정 파일을 쓰고 싶을 때만 `--config <path>`를 지정하면 됩니다.
+
 ## 4-1) 전체 왕복 로그 보기 (Discord <-> LLM <-> FVTT)
 
 - Quick Setup에서 `Enable full trace log` 체크

@@ -3,7 +3,7 @@ const path = require("node:path");
 const readline = require("node:readline");
 
 const { AppRuntime } = require("./app-runtime");
-const { loadAppConfig, saveAppConfig } = require("./config-store");
+const { getDefaultConfigPath, loadAppConfig, saveAppConfig } = require("./config-store");
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -27,8 +27,21 @@ function parseArgs(argv) {
   return args;
 }
 
+function defaultUserDataDir() {
+  const appName = "fvtt-ai-runtime";
+  if (process.platform === "win32") {
+    return path.join(String(process.env.APPDATA || process.cwd()), appName);
+  }
+  if (process.platform === "darwin") {
+    return path.join(String(process.env.HOME || process.cwd()), "Library", "Application Support", appName);
+  }
+  const xdg = String(process.env.XDG_CONFIG_HOME || "").trim();
+  if (xdg) return path.join(xdg, appName);
+  return path.join(String(process.env.HOME || process.cwd()), ".config", appName);
+}
+
 function defaultConfigPath() {
-  return path.join(process.cwd(), "config.json");
+  return getDefaultConfigPath(defaultUserDataDir());
 }
 
 function askLine(question) {
@@ -117,13 +130,16 @@ async function main() {
       [
         "fvtt-ai-runtime CLI",
         "",
+        "Default config path: " + defaultConfigPath(),
+        "  (override with --config <path>)",
+        "",
         "Commands:",
-        "  node runtime/cli.js diagnose [--config ./config.json]",
-        "  node runtime/cli.js run [--config ./config.json]",
-        "  node runtime/cli.js setup [--config ./config.json]",
-        "  node runtime/cli.js codex-login [--config ./config.json]",
-        "  node runtime/cli.js oauth-login [--config ./config.json]",
-        "  node runtime/cli.js probe [--config ./config.json] [--npc diana] [--target 피티팡] [--maxTokens 60]",
+        "  node runtime/cli.js diagnose [--config <path>]",
+        "  node runtime/cli.js run [--config <path>]",
+        "  node runtime/cli.js setup [--config <path>]",
+        "  node runtime/cli.js codex-login [--config <path>]",
+        "  node runtime/cli.js oauth-login [--config <path>]",
+        "  node runtime/cli.js probe [--config <path>] [--npc diana] [--target targetName] [--maxTokens 60]",
       ].join("\n")
     );
     return;
@@ -390,3 +406,4 @@ main().catch((err) => {
   console.error("[fatal]", err?.message || err);
   process.exit(1);
 });
+

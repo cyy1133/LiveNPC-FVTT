@@ -27,11 +27,15 @@ npm.cmd start
 
 ```powershell
 cd fvtt-ai-runtime
-node runtime/cli.js setup --config .\config.json
-node runtime/cli.js codex-login --config .\config.json
-node runtime/cli.js diagnose --config .\config.json
-node runtime/cli.js run --config .\config.json
+node runtime/cli.js setup
+node runtime/cli.js codex-login
+node runtime/cli.js diagnose
+node runtime/cli.js run
 ```
+
+- CLI default config path is now the same as EXE:
+  - Windows: `%APPDATA%\\fvtt-ai-runtime\\config.json`
+  - You can still override with `--config <path>`
 
 ## Build installer
 
