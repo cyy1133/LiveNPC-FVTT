@@ -1,0 +1,71 @@
+{
+  "discord": {
+    "enabled": true,
+    "botToken": "PUT_DISCORD_BOT_TOKEN_HERE",
+    "channelName": "aibot",
+    "requireMention": true
+  },
+  "foundry": {
+    "enabled": true,
+    "url": "https://your-foundry.example",
+    "username": "YOUR_FVTT_USERNAME",
+    "password": "YOUR_FVTT_PASSWORD",
+    "headless": true,
+    "loginTimeoutMs": 120000,
+    "autoConnect": true,
+    "keepAliveMs": 30000,
+    "pollChatEveryMs": 1200
+  },
+  "llm": {
+    "provider": "codex-cli",
+    "codexCli": {
+      "binPath": "",
+      "model": "gpt-5.3-codex"
+    },
+    "openai": {
+      "apiBaseUrl": "https://api.openai.com",
+      "model": "gpt-5",
+      "apiKey": "",
+      "oauth": {
+        "accessToken": "",
+        "refreshToken": "",
+        "expiresAtMs": 0
+      }
+    }
+  },
+  "runtime": {
+    "trace": {
+      "enabled": true,
+      "toUi": false,
+      "includePrompt": true,
+      "includeLlmRaw": true,
+      "includeContexts": true,
+      "logDir": "",
+      "logFile": ""
+    }
+  },
+  "npc": {
+    "difficultTerrainMultiplier": 2,
+    "defaultNpcId": "diana",
+    "sharedDocs": {
+      "world": ".\\persona-defaults\\world.md"
+    }
+  },
+  "npcs": [
+    {
+      "id": "diana",
+      "displayName": "양치기 디아나",
+      "enabled": true,
+      "actor": { "type": "name", "value": "양치기 디아나" },
+      "personaDocs": {
+        "identity": "",
+        "soul": ".\\persona-defaults\\npc.md",
+        "behavior": "",
+        "battle": ".\\persona-defaults\\battlePattern.md",
+        "relations": "",
+        "memory": ""
+      },
+      "triggers": { "minFt": 2, "maxFt": 30 }
+    }
+  ]
+}

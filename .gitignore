@@ -1,0 +1,11 @@
+node_modules/
+dist/
+out/
+.cache/
+logs/
+.env
+config.json
+secrets.json
+*.log
+runtime-trace-*.ndjson
+*.pid

@@ -1,0 +1,44 @@
+{
+  "name": "fvtt-ai-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Standalone desktop runtime to connect FVTT <-> Discord <-> LLM for multi-NPC autonomy.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "set ELECTRON_DISABLE_SECURITY_WARNINGS=true && electron .",
+    "diagnose": "node runtime/cli.js diagnose",
+    "run-headless": "node runtime/cli.js run",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "playwright": "^1.52.0"
+  },
+  "devDependencies": {
+    "electron": "^37.3.1",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "local.fvtt.ai.npc.runtime",
+    "productName": "FVTT AI NPC Runtime",
+    "files": [
+      "src/**",
+      "runtime/**",
+      "Spec.md",
+      "README.md",
+      "config.example.json",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "asar": false,
+    "win": {
+      "target": "nsis"
+    }
+  }
+}

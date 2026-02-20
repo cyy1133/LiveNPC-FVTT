@@ -1,0 +1,200 @@
+﻿<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self';"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FVTT AI NPC Runtime</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header>
+      <div class="title">
+        <div class="appname">FVTT AI NPC Runtime</div>
+        <div class="sub">Standalone runtime for FVTT / Discord / LLM (no OpenClaw dependency)</div>
+      </div>
+      <div class="actions">
+        <button id="btn-start" class="primary">Start</button>
+        <button id="btn-stop">Stop</button>
+        <button id="btn-diag">Diagnostics</button>
+        <button id="btn-oauth">Codex Login</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="panel">
+        <h2>Status</h2>
+        <div class="grid2">
+          <div class="kv"><div class="k">App Version</div><div class="v" id="app-version">-</div></div>
+          <div class="kv"><div class="k">Config</div><div class="v" id="config-path">-</div></div>
+        </div>
+        <div class="hint">Save config first, then run Diagnostics before Start.</div>
+      </section>
+
+      <section class="panel">
+        <div class="row">
+          <h2 style="margin: 0">Quick Setup</h2>
+          <div class="row-actions">
+            <button id="btn-install-prereq">Install Prerequisites</button>
+            <button id="btn-save-quick" class="primary">Save Quick Setup</button>
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <div class="field">
+            <label for="f-discord-token">Discord Bot Token</label>
+            <input id="f-discord-token" type="password" placeholder="Discord Bot Token" />
+          </div>
+          <div class="field">
+            <label for="f-discord-channel">Discord Channel</label>
+            <input id="f-discord-channel" type="text" placeholder="aibot" />
+          </div>
+          <div class="field checkbox">
+            <label>
+              <input id="f-discord-mention" type="checkbox" />
+              Require mention to reply
+            </label>
+          </div>
+
+          <div class="field">
+            <label for="f-fvtt-url">FVTT URL</label>
+            <input id="f-fvtt-url" type="text" placeholder="https://your-foundry.example" />
+          </div>
+          <div class="field">
+            <label for="f-fvtt-user">FVTT Username</label>
+            <input id="f-fvtt-user" type="text" placeholder="username" />
+          </div>
+          <div class="field">
+            <label for="f-fvtt-pass">FVTT Password</label>
+            <input id="f-fvtt-pass" type="password" placeholder="password" />
+          </div>
+          <div class="field checkbox">
+            <label>
+              <input id="f-fvtt-headless" type="checkbox" />
+              Headless browser
+            </label>
+          </div>
+
+          <div class="field">
+            <label for="f-llm-provider">LLM Provider</label>
+            <select id="f-llm-provider">
+              <option value="codex-cli">Codex CLI (ChatGPT subscription)</option>
+              <option value="openai-oauth">OpenAI OAuth</option>
+              <option value="openai-api-key">OpenAI API Key</option>
+            </select>
+          </div>
+          <div class="field">
+            <label id="f-model-label" for="f-openai-model">Model</label>
+            <input id="f-openai-model" type="text" placeholder="gpt-5.3-codex" />
+          </div>
+          <div class="field" id="f-openai-key-wrap">
+            <label for="f-openai-key">OpenAI API Key</label>
+            <input id="f-openai-key" type="password" placeholder="sk-..." />
+          </div>
+          <div class="field" id="f-codex-bin-wrap">
+            <label for="f-codex-bin">Codex CLI Path (optional)</label>
+            <input id="f-codex-bin" type="text" placeholder="codex.exe or full path" />
+          </div>
+          <div class="field checkbox">
+            <label>
+              <input id="f-trace-enabled" type="checkbox" />
+              Enable full trace log (Discord/LLM/FVTT payloads)
+            </label>
+          </div>
+          <div class="field">
+            <label for="f-trace-logdir">Trace Log Folder (optional)</label>
+            <input id="f-trace-logdir" type="text" placeholder="default: userData/logs" />
+          </div>
+          <div class="field">
+            <label>Login Status</label>
+            <div class="oauth-row">
+              <div class="oauth-status" id="oauth-status">-</div>
+              <button id="btn-oauth-inline">Codex Login</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="hint">
+          Recommended: click <code>Install Prerequisites</code> once on first run.
+          For Codex CLI, login is completed in a terminal window.
+        </div>
+        <div class="hint">
+          Full trace files are saved as <code>runtime-trace-*.ndjson</code>. Start log에서 실제 경로를 확인하세요.
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="row">
+          <h2 style="margin: 0">NPC</h2>
+          <div class="row-actions">
+            <button id="btn-reload-npc" type="button">Reload NPC</button>
+            <button id="btn-save-npc" type="button" class="primary">Save NPC</button>
+            <button id="btn-add-npc" type="button">Add NPC</button>
+          </div>
+        </div>
+        <div class="npc-layout" id="npc-layout">
+          <div class="npc-main">
+            <div class="field">
+              <label for="f-world-doc">Shared World Lore File (.md)</label>
+              <div class="file-row">
+                <input id="f-world-doc" type="text" placeholder="C:\\docs\\world.md" />
+                <button id="btn-world-doc-pick" type="button">Select</button>
+                <button id="btn-world-doc-edit" type="button">Edit</button>
+              </div>
+            </div>
+            <div class="hint">One shared world-lore markdown is included for every NPC prompt.</div>
+            <div class="hint">Toggle NPCs on/off and set actor + soul/battle files. Use `Save NPC` / `Reload NPC` for NPC-only persistence.</div>
+            <div class="hint">Reaction distance: NPC responds only when source token is within `React Distance <= ft` (0 disables this gate). If source token is not resolved, it is skipped.</div>
+            <div class="npc-list" id="npc-list"></div>
+          </div>
+          <aside class="md-editor-panel" id="md-editor-panel">
+            <div class="row">
+              <h2 style="margin: 0" id="md-editor-title">Selected Markdown</h2>
+              <div class="row-actions">
+                <button id="btn-md-reload" type="button">Reload</button>
+                <button id="btn-md-save" type="button" class="primary">Save</button>
+                <button id="btn-md-close" type="button">Close</button>
+              </div>
+            </div>
+            <div class="md-editor-path" id="md-editor-path">-</div>
+            <textarea class="md-editor-text" id="md-editor-text" spellcheck="false"></textarea>
+            <div class="hint" id="md-editor-status">Select any markdown file to edit.</div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="row">
+          <h2 style="margin: 0">Advanced Config (JSON)</h2>
+          <div class="row-actions">
+            <button id="btn-reload-config">Reload</button>
+            <button id="btn-save-config" class="primary">Save</button>
+          </div>
+        </div>
+        <textarea class="config-editor" id="config-editor" spellcheck="false"></textarea>
+        <div class="hint">MVP stores secrets in config file. Keep this machine private.</div>
+      </section>
+
+      <section class="panel">
+        <h2>Log</h2>
+        <div class="logbox" id="logbox"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Diagnostics Output</h2>
+        <pre class="diag" id="diag-out">(not run yet)</pre>
+      </section>
+    </main>
+
+    <footer>
+      <a href="#" id="link-spec">Open Spec.md (in editor)</a>
+      <span class="sep">|</span>
+      <span class="muted">Work in progress: security hardening, plugin model, multi-NPC orchestration.</span>
+    </footer>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>
