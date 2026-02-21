@@ -1,4 +1,4 @@
-﻿const { chromium } = require("playwright");
+const { chromium } = require("playwright");
 
 class FvttClient {
   constructor(config) {
@@ -1342,6 +1342,165 @@ class FvttClient {
     }, this._actorSelector());
   }
 
+  async endActorCombatTurn(expectedTurnKey = "") {
+    await this._waitForGameReady();
+    return this.page.evaluate(
+      async ({ actorId, actorName, expectedTurnKey: rawExpectedTurnKey }) => {
+        function sceneTokens(scene) {
+          if (!scene) return [];
+          if (Array.isArray(scene.tokens?.contents)) return scene.tokens.contents;
+          if (Array.isArray(scene.tokens)) return scene.tokens;
+          return [];
+        }
+
+        function findActor() {
+          if (actorId) return game.actors.get(actorId) ?? null;
+          if (!actorName) return null;
+          const named = game.actors.filter((actor) => actor.name === actorName);
+          if (named.length <= 1) return named[0] ?? null;
+
+          const preferredScenes = [];
+          const pushUnique = (scene) => {
+            if (!scene?.id) return;
+            if (!preferredScenes.some((entry) => entry.id === scene.id)) preferredScenes.push(scene);
+          };
+          pushUnique(canvas?.scene || null);
+          pushUnique(game.scenes.current || null);
+          pushUnique(game.scenes.active || null);
+
+          for (const scene of preferredScenes) {
+            const actorIdsOnScene = new Set(sceneTokens(scene).map((token) => String(token?.actorId || "")));
+            const sceneMatch = named.find((candidate) => actorIdsOnScene.has(String(candidate?.id || "")));
+            if (sceneMatch) return sceneMatch;
+          }
+          return named[0] ?? null;
+        }
+
+        function findTokenForActor(actor) {
+          if (!actor) return { scene: null, token: null };
+          const preferredScenes = [];
+          const pushUnique = (scene) => {
+            if (!scene?.id) return;
+            if (!preferredScenes.some((entry) => entry.id === scene.id)) preferredScenes.push(scene);
+          };
+
+          pushUnique(canvas?.scene || null);
+          pushUnique(game.scenes.current || null);
+          pushUnique(game.scenes.active || null);
+
+          for (const scene of preferredScenes) {
+            const found = sceneTokens(scene).find((token) => token.actorId === actor.id);
+            if (found) return { scene, token: found };
+          }
+          for (const scene of game.scenes.contents) {
+            const found = sceneTokens(scene).find((token) => token.actorId === actor.id);
+            if (found) return { scene, token: found };
+          }
+          return { scene: null, token: null };
+        }
+
+        function pickCombat(scene) {
+          const all = Array.isArray(game.combats?.contents) ? game.combats.contents : [];
+          if (!all.length) return null;
+          const sceneId = String(scene?.id || canvas?.scene?.id || game.scenes.current?.id || "");
+          const open = all.filter((combat) => !combat?.ended);
+          const byScene = open.filter((combat) => String(combat?.scene?.id || combat?.sceneId || "") === sceneId);
+          return (
+            game.combat ||
+            byScene.find((combat) => Boolean(combat?.started || combat?.active)) ||
+            byScene[0] ||
+            open.find((combat) => Boolean(combat?.started || combat?.active)) ||
+            open[0] ||
+            null
+          );
+        }
+
+        const actor = findActor();
+        if (!actor) {
+          return { ok: false, error: "Actor not found for combat turn end." };
+        }
+
+        const { scene, token } = findTokenForActor(actor);
+        const combat = pickCombat(scene);
+        if (!combat) {
+          return { ok: false, error: "No active combat found." };
+        }
+
+        const combatants = Array.isArray(combat.combatants?.contents)
+          ? combat.combatants.contents
+          : Array.isArray(combat.combatants)
+            ? combat.combatants
+            : [];
+
+        const roundBefore = Number.isFinite(Number(combat.round)) ? Number(combat.round) : 0;
+        const turnBefore = Number.isFinite(Number(combat.turn)) ? Number(combat.turn) : -1;
+        const currentCombatant =
+          Number.isInteger(turnBefore) && turnBefore >= 0 && turnBefore < combatants.length
+            ? combatants[turnBefore] || null
+            : combat.combatant || null;
+        const currentCombatantId = String(currentCombatant?.id || "");
+        const turnKeyBefore = `${String(combat.id || "")}:${roundBefore}:${turnBefore}:${currentCombatantId}`;
+
+        const expectedTurnKey = String(rawExpectedTurnKey || "").trim();
+        if (expectedTurnKey && turnKeyBefore !== expectedTurnKey) {
+          return {
+            ok: true,
+            skipped: true,
+            reason: "turn-already-advanced",
+            expectedTurnKey,
+            turnKeyBefore,
+          };
+        }
+
+        const actorIdText = String(actor.id || "");
+        const actorTokenId = String(token?.id || "");
+        const ownsCurrentTurn =
+          String(currentCombatant?.actorId || currentCombatant?.actor?.id || "") === actorIdText ||
+          (actorTokenId && String(currentCombatant?.tokenId || currentCombatant?.token?.id || "") === actorTokenId);
+
+        if (!ownsCurrentTurn) {
+          return {
+            ok: true,
+            skipped: true,
+            reason: "not-actor-turn",
+            turnKeyBefore,
+          };
+        }
+
+        if (typeof combat.nextTurn !== "function") {
+          return { ok: false, error: "combat.nextTurn is unavailable." };
+        }
+
+        try {
+          await combat.nextTurn();
+        } catch (error) {
+          return { ok: false, error: error?.message || String(error), turnKeyBefore };
+        }
+
+        const roundAfter = Number.isFinite(Number(combat.round)) ? Number(combat.round) : roundBefore;
+        const turnAfter = Number.isFinite(Number(combat.turn)) ? Number(combat.turn) : turnBefore;
+        const nextCombatant =
+          Number.isInteger(turnAfter) && turnAfter >= 0 && turnAfter < combatants.length
+            ? combatants[turnAfter] || null
+            : combat.combatant || null;
+        const nextCombatantId = String(nextCombatant?.id || "");
+        const turnKeyAfter = `${String(combat.id || "")}:${roundAfter}:${turnAfter}:${nextCombatantId}`;
+
+        return {
+          ok: true,
+          skipped: false,
+          combatId: String(combat.id || ""),
+          roundBefore,
+          turnBefore,
+          roundAfter,
+          turnAfter,
+          turnKeyBefore,
+          turnKeyAfter,
+        };
+      },
+      { ...this._actorSelector(), expectedTurnKey: String(expectedTurnKey || "") }
+    );
+  }
   async setActorTarget(targetTokenRef) {
     await this._waitForGameReady();
     return this.page.evaluate(

@@ -1564,6 +1564,7 @@ function buildCombatTurnInboundText({ npcName, combatState } = {}) {
     "[AUTO_COMBAT_TURN]",
     `지금은 ${name}의 전투 턴입니다.`,
     "이번 턴에 합법적이고 실행 가능한 행동을 반드시 수행하세요.",
+    "replyText는 턴 시작 대사로 짧게 작성하세요 (1~2문장).",
     "가능하면 적을 지정하고 공격/주문을 사용하세요. 사거리 밖이면 먼저 이동 후 공격하세요.",
     "반드시 replyText 끝에 FVTT_ACTION 태그를 포함하세요.",
   ];
@@ -2193,9 +2194,34 @@ class AppRuntime {
       this.log.error("llm", `LLM failed (combat turn): ${e?.message || e}`);
       this._maybeLogOpenAiScopeHint(e, config);
       this._trace("llm.error.combat", { npcId: npc?.id || "", npcName, turnKey, error: e });
-      return;
+      replyText = "짧게 숨을 고르며 전황을 살핀다.";
+      intent = { type: "none", args: {} };
     }
 
+    // 1) Turn start speech
+    const startSpeech = String(replyText || "").trim();
+    if (startSpeech) {
+      try {
+        await this._withNpcActor(npc, () => this.fvtt.speakAsActor(startSpeech));
+        this._trace("fvtt.speak.outbound", {
+          npcId: npc?.id || "",
+          npcName,
+          text: startSpeech,
+          origin: "combat-turn-start",
+          turnKey,
+        });
+      } catch (e) {
+        this.log.warn("combat", `start speech failed (${npcName}): ${e?.message || e}`);
+        this._trace("fvtt.speak.error", {
+          npcId: npc?.id || "",
+          error: e,
+          origin: "combat-turn-start",
+          turnKey,
+        });
+      }
+    }
+
+    // 2) Action execution
     if (intent?.type && intent.type !== "none") {
       try {
         this._trace("fvtt.intent.execute.start", {
@@ -2224,23 +2250,50 @@ class AppRuntime {
       }
     }
 
+    // 3) Turn end handoff to next combatant
+    let endTurn = null;
     try {
-      await this._withNpcActor(npc, () => this.fvtt.speakAsActor(replyText));
-      this._trace("fvtt.speak.outbound", {
+      endTurn = await this._withNpcActor(npc, () => this.fvtt.endActorCombatTurn(turnKey));
+      this._trace("fvtt.combat.turn.end", {
         npcId: npc?.id || "",
         npcName,
-        text: replyText,
-        origin: "combat-turn",
         turnKey,
+        result: endTurn,
       });
+      if (!endTurn?.ok) {
+        this.log.warn("combat", `turn end failed (${npcName}): ${String(endTurn?.error || "unknown error")}`);
+      }
     } catch (e) {
-      this.log.warn("combat", `speak failed (${npcName}): ${e?.message || e}`);
-      this._trace("fvtt.speak.error", {
+      this.log.warn("combat", `turn end failed (${npcName}): ${e?.message || e}`);
+      this._trace("fvtt.combat.turn.end.error", {
         npcId: npc?.id || "",
-        error: e,
-        origin: "combat-turn",
+        npcName,
         turnKey,
+        error: e,
       });
+    }
+
+    // 4) Turn end speech
+    if (endTurn?.ok && !endTurn?.skipped) {
+      const endSpeech = "행동을 마치고 턴을 넘긴다.";
+      try {
+        await this._withNpcActor(npc, () => this.fvtt.speakAsActor(endSpeech));
+        this._trace("fvtt.speak.outbound", {
+          npcId: npc?.id || "",
+          npcName,
+          text: endSpeech,
+          origin: "combat-turn-end",
+          turnKey,
+        });
+      } catch (e) {
+        this.log.warn("combat", `end speech failed (${npcName}): ${e?.message || e}`);
+        this._trace("fvtt.speak.error", {
+          npcId: npc?.id || "",
+          error: e,
+          origin: "combat-turn-end",
+          turnKey,
+        });
+      }
     }
   }
 
