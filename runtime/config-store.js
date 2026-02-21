@@ -100,6 +100,7 @@ function defaultConfig(defaultDocs = {}) {
       autoConnect: true,
       keepAliveMs: 30_000,
       pollChatEveryMs: 1200,
+      combatAutoTurn: true,
     },
     llm: {
       provider: "codex-cli", // codex-cli | openai-oauth | openai-api-key

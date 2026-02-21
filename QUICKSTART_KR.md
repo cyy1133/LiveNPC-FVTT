@@ -67,6 +67,9 @@
   - NPC 기본 이미지 프롬프트(default prompt)
     를 개별 설정할 수 있습니다.
 - FVTT 인바운드는 런타임 시작 시점 이후 메시지만 반응합니다.
+- 전투가 활성화되고 해당 NPC가 전투 순서에 포함되어 있으면, 자신의 턴에 자동으로 행동을 시도합니다.
+  - 기본값: `foundry.combatAutoTurn = true`
+  - 끄려면 설정 파일에서 `foundry.combatAutoTurn`을 `false`로 설정
 
 ## 4-2) 소스 원클릭 빌드
 

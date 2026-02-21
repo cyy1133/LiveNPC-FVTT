@@ -1553,6 +1553,41 @@ function buildNpcPrompt({
   return parts.join("\n");
 }
 
+function buildCombatTurnInboundText({ npcName, combatState } = {}) {
+  const name = String(npcName || "NPC");
+  const state = isPlainObject(combatState) ? combatState : {};
+  const combat = isPlainObject(state?.combat) ? state.combat : {};
+  const current = isPlainObject(state?.currentCombatant) ? state.currentCombatant : {};
+  const hostiles = ensureArray(state?.nearbyHostiles).slice(0, 4);
+
+  const lines = [
+    "[AUTO_COMBAT_TURN]",
+    `지금은 ${name}의 전투 턴입니다.`,
+    "이번 턴에 합법적이고 실행 가능한 행동을 반드시 수행하세요.",
+    "가능하면 적을 지정하고 공격/주문을 사용하세요. 사거리 밖이면 먼저 이동 후 공격하세요.",
+    "반드시 replyText 끝에 FVTT_ACTION 태그를 포함하세요.",
+  ];
+
+  const round = Number(combat.round ?? state.round);
+  const turn = Number(combat.turn ?? state.turn);
+  if (Number.isFinite(round) && round > 0) lines.push(`- Round: ${round}`);
+  if (Number.isFinite(turn) && turn >= 0) lines.push(`- Turn Index: ${turn}`);
+  if (current.name || current.id) {
+    lines.push(`- Current Combatant: ${String(current.name || current.id)}`);
+  }
+
+  if (hostiles.length > 0) {
+    lines.push("- Nearby hostiles:");
+    for (const hostile of hostiles) {
+      const dist = Number.isFinite(Number(hostile?.distanceFt)) ? `${Number(hostile.distanceFt)}ft` : "?ft";
+      lines.push(`  - ${String(hostile?.name || hostile?.id || "target")} (${String(hostile?.id || "?")}) dist=${dist}`);
+    }
+  }
+
+  lines.push('행동이 불가능하면 [[FVTT_ACTION {"type":"none"}]] 를 넣으세요.');
+  return lines.join("\n");
+}
+
 function normalizeIntent(output) {
   const root = isPlainObject(output) ? output : {};
   const replyText = String(root.replyText || "").trim();
@@ -1639,7 +1674,9 @@ class AppRuntime {
     this._configRef = null;
 
     this._fvttPollTimer = null;
+    this._fvttObserverInFlight = false;
     this._processedFvttMessageIds = new Set();
+    this._processedCombatTurnKeysByNpc = new Map();
     this._fvttInboundCutoffTs = 0;
     this._openAiScopeHintShown = false;
 
@@ -1695,6 +1732,7 @@ class AppRuntime {
           loginTimeoutMs: Number(config.foundry.loginTimeoutMs || 120_000),
           autoConnect: Boolean(config.foundry.autoConnect),
           keepAliveMs: Number(config.foundry.keepAliveMs || 30_000),
+          combatAutoTurn: config?.foundry?.combatAutoTurn !== false,
           actorId: "", // selected per-NPC via withNpcActor()
           actorName: "",
         },
@@ -1735,6 +1773,7 @@ class AppRuntime {
     this._persistConfig = null;
     this._configRef = null;
     this._fvttInboundCutoffTs = 0;
+    this._processedCombatTurnKeysByNpc.clear();
 
     if (this.discord) {
       try {
@@ -1842,7 +1881,7 @@ class AppRuntime {
 
     const everyMs = Math.max(500, Number(config?.foundry?.pollChatEveryMs || 1200));
     this._fvttPollTimer = setInterval(() => {
-      void this._pollFvttChat(config);
+      void this._pollFvttObservers(config);
     }, everyMs);
 
     if (this._fvttPollTimer && typeof this._fvttPollTimer.unref === "function") {
@@ -1855,7 +1894,20 @@ class AppRuntime {
       clearInterval(this._fvttPollTimer);
       this._fvttPollTimer = null;
     }
+    this._fvttObserverInFlight = false;
     this._processedFvttMessageIds.clear();
+    this._processedCombatTurnKeysByNpc.clear();
+  }
+
+  async _pollFvttObservers(config) {
+    if (this._fvttObserverInFlight) return;
+    this._fvttObserverInFlight = true;
+    try {
+      await this._pollFvttChat(config);
+      await this._pollFvttCombatTurns(config);
+    } finally {
+      this._fvttObserverInFlight = false;
+    }
   }
 
   async _pollFvttChat(config) {
@@ -1946,6 +1998,249 @@ class AppRuntime {
         this._handleNpcFvttInbound({ config, npc: hitNpc, speaker, text: content })
       );
       await this.queue.catch(() => {});
+    }
+  }
+
+  async _pollFvttCombatTurns(config) {
+    if (!this.started) return;
+    if (!this.fvtt || !config?.foundry?.enabled) return;
+    if (!this.fvtt.isReady()) return;
+    if (config?.foundry?.combatAutoTurn === false) return;
+
+    const npcs = pickEnabledNpcs(config);
+    if (!npcs.length) return;
+
+    for (const npc of npcs) {
+      const npcName = String(npc?.displayName || npc?.id || "NPC");
+      const npcKey = String(npc?.id || npcName || "").trim() || `npc:${Math.random().toString(36).slice(2, 8)}`;
+
+      let state = null;
+      try {
+        state = await this._withNpcActor(npc, () => this.fvtt.getActorCombatState());
+      } catch (e) {
+        const message = String(e?.message || e);
+        if (
+          !this.started ||
+          /Target page, context or browser has been closed|Browser has been closed|Protocol error/i.test(message)
+        ) {
+          this._trace("fvtt.combat.poll.skip", { npcId: npc?.id || "", npcName, reason: "session-closed", message });
+          continue;
+        }
+        this.log.warn("combat", `poll failed (${npcName}): ${message}`);
+        this._trace("fvtt.combat.poll.error", { npcId: npc?.id || "", npcName, error: e });
+        continue;
+      }
+
+      this._trace("fvtt.combat.poll", {
+        npcId: npc?.id || "",
+        npcName,
+        state: state || null,
+      });
+
+      if (!state?.ok) continue;
+      if (!state?.inCombat) continue;
+      if (!state?.actorInCombat) continue;
+      if (!state?.isActorTurn) continue;
+
+      const turnKey = String(state?.turnKey || "").trim();
+      if (!turnKey) continue;
+
+      const prevTurnKey = this._processedCombatTurnKeysByNpc.get(npcKey);
+      if (prevTurnKey === turnKey) continue;
+      this._processedCombatTurnKeysByNpc.set(npcKey, turnKey);
+      if (this._processedCombatTurnKeysByNpc.size > 200) {
+        this._processedCombatTurnKeysByNpc.clear();
+      }
+
+      this.log.info("combat", `auto turn -> ${npcName} (${turnKey})`);
+      this._trace("fvtt.combat.turn.trigger", {
+        npcId: npc?.id || "",
+        npcName,
+        turnKey,
+        round: Number(state?.combat?.round ?? state?.round ?? 0),
+        turn: Number(state?.combat?.turn ?? state?.turn ?? -1),
+      });
+
+      this.queue = this.queue.then(() => this._handleNpcCombatTurn({ config, npc, combatState: state }));
+      await this.queue.catch((e) => {
+        this.log.warn("combat", `turn handler failed (${npcName}): ${e?.message || e}`);
+        this._trace("fvtt.combat.turn.error", {
+          npcId: npc?.id || "",
+          npcName,
+          turnKey,
+          error: e,
+        });
+      });
+    }
+  }
+
+  async _handleNpcCombatTurn({ config, npc, combatState }) {
+    const npcName = String(npc?.displayName || npc?.id || "NPC");
+    const turnKey = String(combatState?.turnKey || "").trim();
+    const text = buildCombatTurnInboundText({ npcName, combatState });
+
+    this._trace("fvtt.combat.turn.handle.start", {
+      npcId: npc?.id || "",
+      npcName,
+      turnKey,
+      text,
+    });
+
+    const personaText = await loadNpcPromptDocs({ config, npc });
+
+    let fvttChatContext = [];
+    let fvttSceneContext = null;
+    let fvttActorSheet = null;
+    try {
+      const chat = await this.fvtt.getRecentChat(10);
+      if (chat?.ok) fvttChatContext = chat.messages || [];
+      fvttSceneContext = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(60));
+      fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet());
+    } catch (e) {
+      this.log.warn("combat", `context build failed (${npcName}): ${e?.message || e}`);
+      this._trace("fvtt.combat.turn.context.error", { npcId: npc?.id || "", npcName, error: e });
+    }
+
+    if (this._traceIncludeContexts) {
+      this._trace("fvtt.combat.turn.context", {
+        npcId: npc?.id || "",
+        npcName,
+        turnKey,
+        chat: fvttChatContext,
+        scene: fvttSceneContext,
+        actorSheet: fvttActorSheet,
+        combatState,
+      });
+    }
+
+    const prompt = buildNpcPrompt({
+      npc,
+      inboundText: text,
+      fvttReady: true,
+      personaText,
+      fvttChatContext,
+      fvttSceneContext,
+      fvttActorSheet,
+      mentionedSceneTokens: ensureArray(combatState?.nearbyHostiles).slice(0, 4),
+      imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
+    });
+
+    let replyText = "";
+    let intent = { type: "none", args: {} };
+    let strictExecution = false;
+    try {
+      const completion = await this._completeNpcJson({
+        config,
+        prompt,
+        timeoutMs: 90_000,
+        traceMeta: {
+          origin: "combat-turn",
+          npcId: npc?.id || "",
+          npcName,
+          turnKey,
+        },
+      });
+      const normalized = normalizeIntent(completion.parsed);
+      const actionTag = extractFvttActionTags(normalized.replyText);
+      replyText = actionTag.hadTag ? actionTag.visibleText || "(...)" : normalized.replyText || "(...)";
+
+      let baseIntent = normalized.intent;
+      let allowFallback = true;
+      let allowRepair = true;
+      let actionIntentSource = "intent";
+      if (actionTag.hadTag) {
+        if (actionTag.actions.length > 0) {
+          baseIntent = buildIntentFromActionTags(actionTag.actions);
+          allowFallback = false;
+          allowRepair = false;
+          strictExecution = true;
+          actionIntentSource = "tag-strict";
+        } else if (actionTag.hadExplicitNone && actionTag.parseErrors.length === 0) {
+          baseIntent = { type: "none", args: {} };
+          allowFallback = false;
+          allowRepair = false;
+          strictExecution = true;
+          actionIntentSource = "tag-none";
+        }
+      }
+      if (!actionTag.hadTag && String(baseIntent?.type || "none").toLowerCase() === "plan") {
+        allowFallback = false;
+        allowRepair = false;
+        strictExecution = true;
+        actionIntentSource = "intent-plan-strict";
+      }
+
+      intent = this._applyFallbackIntentFromText({
+        text,
+        intent: baseIntent,
+        fvttSceneContext,
+        allowFallback,
+        allowRepair,
+      });
+      this._trace("llm.intent.combat", {
+        npcId: npc?.id || "",
+        npcName,
+        turnKey,
+        replyText,
+        actionTag,
+        normalizedIntent: normalized.intent,
+        actionIntentSource,
+        strictExecution,
+        repairedIntent: intent,
+      });
+      this.log.info("llm", `intent(combat): type=${intent.type} args=${compact(JSON.stringify(intent.args), 220)}`);
+    } catch (e) {
+      this.log.error("llm", `LLM failed (combat turn): ${e?.message || e}`);
+      this._maybeLogOpenAiScopeHint(e, config);
+      this._trace("llm.error.combat", { npcId: npc?.id || "", npcName, turnKey, error: e });
+      return;
+    }
+
+    if (intent?.type && intent.type !== "none") {
+      try {
+        this._trace("fvtt.intent.execute.start", {
+          npcId: npc?.id || "",
+          intent,
+          origin: "combat-turn",
+          strictExecution,
+          turnKey,
+        });
+        await this._executeIntentPlan({ config, npc, intent, origin: "combat-turn", strict: strictExecution });
+        this._trace("fvtt.intent.execute.done", {
+          npcId: npc?.id || "",
+          intentType: intent?.type || "none",
+          origin: "combat-turn",
+          turnKey,
+        });
+      } catch (e) {
+        this.log.warn("combat", `intent failed (${npcName}): ${e?.message || e}`);
+        this._trace("fvtt.intent.execute.error", {
+          npcId: npc?.id || "",
+          error: e,
+          intent,
+          origin: "combat-turn",
+          turnKey,
+        });
+      }
+    }
+
+    try {
+      await this._withNpcActor(npc, () => this.fvtt.speakAsActor(replyText));
+      this._trace("fvtt.speak.outbound", {
+        npcId: npc?.id || "",
+        npcName,
+        text: replyText,
+        origin: "combat-turn",
+        turnKey,
+      });
+    } catch (e) {
+      this.log.warn("combat", `speak failed (${npcName}): ${e?.message || e}`);
+      this._trace("fvtt.speak.error", {
+        npcId: npc?.id || "",
+        error: e,
+        origin: "combat-turn",
+        turnKey,
+      });
     }
   }
 

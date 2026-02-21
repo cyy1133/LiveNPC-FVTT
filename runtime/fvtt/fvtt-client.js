@@ -1091,6 +1091,257 @@ class FvttClient {
     });
   }
 
+  async getActorCombatState() {
+    await this._waitForGameReady();
+    return this.page.evaluate(({ actorId, actorName }) => {
+      function sceneTokens(scene) {
+        if (!scene) return [];
+        if (Array.isArray(scene.tokens?.contents)) return scene.tokens.contents;
+        if (Array.isArray(scene.tokens)) return scene.tokens;
+        return [];
+      }
+
+      function normalize(value) {
+        return String(value || "")
+          .toLowerCase()
+          .trim()
+          .replace(/\s+/g, "")
+          .replace(/[^\p{L}\p{N}]+/gu, "");
+      }
+
+      function findActor() {
+        if (actorId) return game.actors.get(actorId) ?? null;
+        if (!actorName) return null;
+        const named = game.actors.filter((actor) => actor.name === actorName);
+        if (named.length <= 1) return named[0] ?? null;
+
+        const preferredScenes = [];
+        const pushUnique = (scene) => {
+          if (!scene?.id) return;
+          if (!preferredScenes.some((entry) => entry.id === scene.id)) preferredScenes.push(scene);
+        };
+        pushUnique(canvas?.scene || null);
+        pushUnique(game.scenes.current || null);
+        pushUnique(game.scenes.active || null);
+
+        for (const scene of preferredScenes) {
+          const actorIdsOnScene = new Set(sceneTokens(scene).map((token) => String(token?.actorId || "")));
+          const sceneMatch = named.find((candidate) => actorIdsOnScene.has(String(candidate?.id || "")));
+          if (sceneMatch) return sceneMatch;
+        }
+        return named[0] ?? null;
+      }
+
+      function findTokenForActor(actor) {
+        if (!actor) return { scene: null, token: null };
+        const preferredScenes = [];
+        const pushUnique = (scene) => {
+          if (!scene?.id) return;
+          if (!preferredScenes.some((entry) => entry.id === scene.id)) preferredScenes.push(scene);
+        };
+
+        pushUnique(canvas?.scene || null);
+        pushUnique(game.scenes.current || null);
+        pushUnique(game.scenes.active || null);
+
+        for (const scene of preferredScenes) {
+          const found = sceneTokens(scene).find((token) => token.actorId === actor.id);
+          if (found) return { scene, token: found };
+        }
+        for (const scene of game.scenes.contents) {
+          const found = sceneTokens(scene).find((token) => token.actorId === actor.id);
+          if (found) return { scene, token: found };
+        }
+        return { scene: null, token: null };
+      }
+
+      function tokenCenter(token, scene) {
+        const gridSizePx = Number(scene?.grid?.size ?? canvas?.grid?.size ?? 100) || 100;
+        return {
+          x: Number(token?.x || 0) + (Number(token?.width || 1) * gridSizePx) / 2,
+          y: Number(token?.y || 0) + (Number(token?.height || 1) * gridSizePx) / 2,
+        };
+      }
+
+      function distanceInfo(fromToken, toToken, scene) {
+        if (!fromToken || !toToken || !scene) return { distanceFt: null, orthDistanceFt: null };
+        const gridSizePx = Number(scene?.grid?.size ?? canvas?.grid?.size ?? 100) || 100;
+        const gridDistance = Number(scene?.grid?.distance ?? canvas?.scene?.grid?.distance ?? 5) || 5;
+        const fromCenter = tokenCenter(fromToken, scene);
+        const toCenter = tokenCenter(toToken, scene);
+        const dxPx = Number(toCenter.x) - Number(fromCenter.x);
+        const dyPx = Number(toCenter.y) - Number(fromCenter.y);
+        const dxCells = Math.round(dxPx / gridSizePx);
+        const dyCells = Math.round(dyPx / gridSizePx);
+        const euclidCells = Math.hypot(dxPx, dyPx) / gridSizePx;
+        const orthCells = Math.abs(dxCells) + Math.abs(dyCells);
+        return {
+          distanceFt: Number.isFinite(euclidCells) ? Number((euclidCells * gridDistance).toFixed(2)) : null,
+          orthDistanceFt: Number.isFinite(orthCells) ? Number((orthCells * gridDistance).toFixed(2)) : null,
+        };
+      }
+
+      function pickCombat(scene) {
+        const all = Array.isArray(game.combats?.contents) ? game.combats.contents : [];
+        if (!all.length) return null;
+        const sceneId = String(scene?.id || canvas?.scene?.id || game.scenes.current?.id || "");
+        const open = all.filter((combat) => !combat?.ended);
+        const byScene = open.filter((combat) => String(combat?.scene?.id || combat?.sceneId || "") === sceneId);
+        return (
+          game.combat ||
+          byScene.find((combat) => Boolean(combat?.started || combat?.active)) ||
+          byScene[0] ||
+          open.find((combat) => Boolean(combat?.started || combat?.active)) ||
+          open[0] ||
+          null
+        );
+      }
+
+      function summarizeCombatant(combatant, combat) {
+        if (!combatant) return null;
+        const tokenId = String(combatant?.tokenId || combatant?.token?.id || "");
+        const tokenDoc = tokenId ? sceneTokens(combat?.scene || null).find((token) => String(token?.id || "") === tokenId) : null;
+        return {
+          id: String(combatant?.id || ""),
+          tokenId,
+          actorId: String(combatant?.actorId || combatant?.actor?.id || ""),
+          name: String(combatant?.name || tokenDoc?.name || combatant?.actor?.name || combatant?.id || ""),
+          initiative: Number.isFinite(Number(combatant?.initiative)) ? Number(combatant.initiative) : null,
+          defeated: Boolean(combatant?.defeated),
+          hidden: Boolean(combatant?.hidden),
+          active: Boolean(combatant?.isActive),
+        };
+      }
+
+      const actor = findActor();
+      if (!actor) {
+        return { ok: false, error: "Actor not found for combat state." };
+      }
+
+      const { scene, token } = findTokenForActor(actor);
+      const combat = pickCombat(scene);
+      if (!combat) {
+        return {
+          ok: true,
+          inCombat: false,
+          actor: { id: actor.id, name: actor.name },
+          token: token
+            ? {
+                id: token.id,
+                name: token.name || token.id,
+                sceneId: scene?.id || "",
+                sceneName: scene?.name || "",
+              }
+            : null,
+        };
+      }
+
+      const combatants = Array.isArray(combat.combatants?.contents)
+        ? combat.combatants.contents
+        : Array.isArray(combat.combatants)
+          ? combat.combatants
+          : [];
+
+      const actorIdText = String(actor.id || "");
+      const actorTokenId = String(token?.id || "");
+      const actorCombatants = combatants.filter((combatant) => {
+        const combatantActorId = String(combatant?.actorId || combatant?.actor?.id || "");
+        const combatantTokenId = String(combatant?.tokenId || combatant?.token?.id || "");
+        if (combatantActorId && combatantActorId === actorIdText) return true;
+        if (actorTokenId && combatantTokenId && combatantTokenId === actorTokenId) return true;
+        return false;
+      });
+
+      const combatTurn = Number(combat.turn);
+      let currentCombatant = null;
+      if (Number.isInteger(combatTurn) && combatTurn >= 0 && combatTurn < combatants.length) {
+        currentCombatant = combatants[combatTurn] || null;
+      }
+      if (!currentCombatant && combat.combatant) {
+        currentCombatant = combat.combatant;
+      }
+
+      const currentCombatantId = String(currentCombatant?.id || "");
+      const isActorTurn = actorCombatants.some((combatant) => String(combatant?.id || "") === currentCombatantId);
+      const round = Number.isFinite(Number(combat.round)) ? Number(combat.round) : 0;
+      const turn = Number.isFinite(Number(combat.turn)) ? Number(combat.turn) : -1;
+      const combatId = String(combat.id || "");
+      const turnKey = combatId && currentCombatantId ? `${combatId}:${round}:${turn}:${currentCombatantId}` : "";
+
+      const actorScene = scene || combat.scene || canvas?.scene || game.scenes.current || null;
+      const actorToken = token || sceneTokens(actorScene).find((doc) => String(doc?.actorId || "") === actorIdText) || null;
+      const actorDisposition = Number(actorToken?.disposition ?? 0);
+
+      const nearbyHostiles = actorScene
+        ? sceneTokens(actorScene)
+            .filter((tokenDoc) => {
+              if (!tokenDoc) return false;
+              if (String(tokenDoc.id || "") === String(actorToken?.id || "")) return false;
+              if (Boolean(tokenDoc.hidden)) return false;
+              if (!actorToken) return true;
+              const tokenDisposition = Number(tokenDoc?.disposition ?? 0);
+              if (actorDisposition === 0 || tokenDisposition === 0) return true;
+              return tokenDisposition !== actorDisposition;
+            })
+            .map((tokenDoc) => {
+              const info = distanceInfo(actorToken, tokenDoc, actorScene);
+              const actorName = tokenDoc.actor?.name || game.actors.get(tokenDoc.actorId)?.name || "";
+              return {
+                id: String(tokenDoc.id || ""),
+                name: String(tokenDoc.name || tokenDoc.id || ""),
+                actorId: String(tokenDoc.actorId || ""),
+                actorName: String(actorName || ""),
+                disposition: Number(tokenDoc?.disposition ?? 0),
+                distanceFt: info.distanceFt,
+                orthDistanceFt: info.orthDistanceFt,
+              };
+            })
+            .sort((a, b) => {
+              const ad = Number.isFinite(Number(a.distanceFt)) ? Number(a.distanceFt) : Number.POSITIVE_INFINITY;
+              const bd = Number.isFinite(Number(b.distanceFt)) ? Number(b.distanceFt) : Number.POSITIVE_INFINITY;
+              if (ad !== bd) return ad - bd;
+              return String(a.name || "").localeCompare(String(b.name || ""), "ko");
+            })
+            .slice(0, 10)
+        : [];
+
+      return {
+        ok: true,
+        inCombat: true,
+        actorInCombat: actorCombatants.length > 0,
+        isActorTurn,
+        turnKey,
+        round,
+        turn,
+        combat: {
+          id: combatId,
+          sceneId: String(combat?.scene?.id || combat?.sceneId || ""),
+          sceneName: String(combat?.scene?.name || ""),
+          started: Boolean(combat?.started),
+          active: Boolean(combat?.active),
+          round,
+          turn,
+        },
+        actor: {
+          id: actor.id,
+          name: actor.name,
+        },
+        token: actorToken
+          ? {
+              id: String(actorToken.id || ""),
+              name: String(actorToken.name || actorToken.id || ""),
+              sceneId: String(actorScene?.id || ""),
+              sceneName: String(actorScene?.name || ""),
+              disposition: Number(actorToken?.disposition ?? 0),
+            }
+          : null,
+        actorCombatants: actorCombatants.map((combatant) => summarizeCombatant(combatant, combat)),
+        currentCombatant: summarizeCombatant(currentCombatant, combat),
+        nearbyHostiles,
+      };
+    }, this._actorSelector());
+  }
+
   async setActorTarget(targetTokenRef) {
     await this._waitForGameReady();
     return this.page.evaluate(

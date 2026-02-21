@@ -14,7 +14,8 @@
     "loginTimeoutMs": 120000,
     "autoConnect": true,
     "keepAliveMs": 30000,
-    "pollChatEveryMs": 1200
+    "pollChatEveryMs": 1200,
+    "combatAutoTurn": true
   },
   "llm": {
     "provider": "codex-cli",

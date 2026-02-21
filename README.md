@@ -16,6 +16,7 @@ npm.cmd start
 - No API key required
 - First-run setup can auto-install prerequisites from GUI (`Install Prerequisites`)
 - Login via GUI button (`Codex Login`) or CLI command (`codex-login`)
+- During FVTT combat, NPCs can auto-act on their own turn (`foundry.combatAutoTurn=true`)
 
 ## Config
 
