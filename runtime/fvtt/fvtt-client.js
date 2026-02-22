@@ -818,6 +818,142 @@ class FvttClient {
           };
         }
 
+        function normalizeStatusKey(value) {
+          return String(value || "")
+            .toLowerCase()
+            .trim()
+            .replace(/\s+/g, "")
+            .replace(/[^\p{L}\p{N}._-]+/gu, "");
+        }
+
+        function combatantsOf(combat) {
+          if (!combat) return [];
+          if (Array.isArray(combat.combatants?.contents)) return combat.combatants.contents;
+          if (Array.isArray(combat.combatants)) return combat.combatants;
+          return [];
+        }
+
+        function pickCombat(scene) {
+          const all = Array.isArray(game.combats?.contents) ? game.combats.contents : [];
+          if (!all.length) return null;
+          const sceneId = String(scene?.id || canvas?.scene?.id || game.scenes.current?.id || "");
+          const open = all.filter((combat) => !combat?.ended);
+          const byScene = open.filter((combat) => String(combat?.scene?.id || combat?.sceneId || "") === sceneId);
+          return (
+            game.combat ||
+            byScene.find((combat) => Boolean(combat?.started || combat?.active)) ||
+            byScene[0] ||
+            open.find((combat) => Boolean(combat?.started || combat?.active)) ||
+            open[0] ||
+            null
+          );
+        }
+
+        function findCombatantForToken(tokenDoc, combat) {
+          if (!tokenDoc || !combat) return null;
+          const tokenId = String(tokenDoc?.id || tokenDoc?.tokenId || "");
+          const actorId = String(tokenDoc?.actorId || tokenDoc?.actor?.id || "");
+          for (const combatant of combatantsOf(combat)) {
+            const combatantTokenId = String(combatant?.tokenId || combatant?.token?.id || "");
+            const combatantActorId = String(combatant?.actorId || combatant?.actor?.id || "");
+            if (tokenId && combatantTokenId && tokenId === combatantTokenId) return combatant;
+            if (actorId && combatantActorId && actorId === combatantActorId) return combatant;
+          }
+          return null;
+        }
+
+        function collectStatusData(tokenDoc, actor) {
+          const statusSet = new Set();
+          const labels = [];
+          const labelSet = new Set();
+
+          const pushStatus = (raw) => {
+            const key = normalizeStatusKey(raw);
+            if (!key) return;
+            statusSet.add(key);
+          };
+
+          const pushLabel = (raw) => {
+            const label = String(raw || "").trim();
+            if (!label) return;
+            if (!labelSet.has(label)) {
+              labelSet.add(label);
+              labels.push(label);
+            }
+            pushStatus(label);
+          };
+
+          const pushIterableStatuses = (iterable) => {
+            if (!iterable || typeof iterable[Symbol.iterator] !== "function") return;
+            for (const entry of iterable) {
+              pushStatus(entry);
+            }
+          };
+
+          pushIterableStatuses(actor?.statuses);
+          pushIterableStatuses(tokenDoc?.statuses);
+
+          const activeEffects = Array.isArray(actor?.effects?.contents)
+            ? actor.effects.contents
+            : Array.isArray(actor?.effects)
+              ? actor.effects
+              : [];
+
+          for (const effect of activeEffects) {
+            if (!effect || effect.disabled === true) continue;
+            pushLabel(effect?.name || effect?.label || "");
+            pushIterableStatuses(effect?.statuses);
+          }
+
+          const statusKeys = Array.from(statusSet);
+          const hasStatus = (re) => statusKeys.some((key) => re.test(key));
+
+          return {
+            labels: labels.slice(0, 12),
+            statusKeys: statusKeys.slice(0, 20),
+            concentration: hasStatus(/concentr|집중/),
+            bleeding: hasStatus(/bleed|hemorr|출혈/),
+            dead: hasStatus(/dead|defeat|dying|사망|죽음/),
+            unconscious: hasStatus(/unconscious|기절|의식없|빈사/),
+          };
+        }
+
+        function summarizeTokenState(tokenDoc, combat) {
+          const actor = tokenDoc?.actor || game.actors.get(tokenDoc?.actorId) || null;
+          const hpRaw = actor?.system?.attributes?.hp ?? {};
+          const hpValue = Number(hpRaw?.value);
+          const hpMax = Number(hpRaw?.max);
+          const hpTemp = Number(hpRaw?.temp ?? 0);
+          const combatant = findCombatantForToken(tokenDoc, combat);
+          const defeated = Boolean(combatant?.defeated || tokenDoc?.combatant?.defeated);
+          const statuses = collectStatusData(tokenDoc, actor);
+          const hpKnown = Number.isFinite(hpValue);
+          const hpZero = hpKnown && hpValue <= 0;
+          const isDeadLike = hpZero || defeated || statuses.dead;
+
+          return {
+            actorName: String(actor?.name || ""),
+            hasPlayerOwner: Boolean(actor?.hasPlayerOwner),
+            hp: {
+              value: hpKnown ? hpValue : null,
+              max: Number.isFinite(hpMax) ? hpMax : null,
+              temp: Number.isFinite(hpTemp) ? hpTemp : 0,
+            },
+            inCombat: Boolean(combatant),
+            combatantId: String(combatant?.id || ""),
+            defeated,
+            isDeadLike,
+            conditions: {
+              concentrating: Boolean(statuses.concentration),
+              bleeding: Boolean(statuses.bleeding),
+              dead: Boolean(statuses.dead),
+              unconscious: Boolean(statuses.unconscious),
+            },
+            effects: statuses.labels,
+            statusKeys: statuses.statusKeys,
+          };
+        }
+
         const scene = canvas?.scene || game.scenes.current || game.scenes.active || null;
         if (!scene) {
           return { ok: false, error: "?쒖꽦 ?ъ쓣 李얠? 紐삵뻽?듬땲??" };
@@ -826,6 +962,7 @@ class FvttClient {
         const actor = findActor();
         const actorInAnyScene = findTokenForActor(actor);
         const sceneTokenDocs = sceneTokens(scene);
+        const combat = pickCombat(scene);
         const gridDistance = Number(scene.grid?.distance ?? 5) || 5;
         const gridUnits = String(scene.grid?.units || "ft");
         const gridSizePx = Number(canvas?.grid?.size ?? scene.grid?.size ?? 100) || 100;
@@ -872,7 +1009,7 @@ class FvttClient {
           : null;
 
         const tokens = sceneTokenDocs.map((token) => {
-          const tokenActor = token.actor || game.actors.get(token.actorId) || null;
+          const tokenState = summarizeTokenState(token, combat);
           const center = {
             x: Number(token.x || 0) + (Number(token.width || 1) * gridSizePx) / 2,
             y: Number(token.y || 0) + (Number(token.height || 1) * gridSizePx) / 2,
@@ -894,14 +1031,22 @@ class FvttClient {
             id: token.id,
             name: token.name || token.id,
             actorId: token.actorId || "",
-            actorName: tokenActor?.name || "",
-            hasPlayerOwner: Boolean(tokenActor?.hasPlayerOwner),
+            actorName: tokenState.actorName,
+            hasPlayerOwner: tokenState.hasPlayerOwner,
             x: Number(token.x || 0),
             y: Number(token.y || 0),
             width: Number(token.width || 1),
             height: Number(token.height || 1),
             hidden: Boolean(token.hidden),
             disposition: Number(token.disposition ?? 0),
+            hp: tokenState.hp,
+            inCombat: tokenState.inCombat,
+            combatantId: tokenState.combatantId,
+            defeated: tokenState.defeated,
+            isDeadLike: tokenState.isDeadLike,
+            conditions: tokenState.conditions,
+            effects: tokenState.effects,
+            statusKeys: tokenState.statusKeys,
             distanceFt,
             orthDistanceFt,
             dxCells,
@@ -955,10 +1100,15 @@ class FvttClient {
                   .filter(([, value]) => Number.isFinite(value))
               )
             : null;
+        const tokenById = new Map(tokens.map((token) => [String(token?.id || ""), token]));
         const targets = Array.from(game.user?.targets || [])
           .map((target) => {
             const document = target?.document || target;
             const targetScene = document?.parent || null;
+            const cached = tokenById.get(String(document?.id || "")) || null;
+            const freshState = cached
+              ? null
+              : summarizeTokenState(document, targetScene?.id === scene?.id ? combat : pickCombat(targetScene));
             const center = target?.center || {
               x:
                 Number(document?.x || 0) +
@@ -987,6 +1137,15 @@ class FvttClient {
               sceneName: String(targetScene?.name || ""),
               x: Number(document?.x || 0),
               y: Number(document?.y || 0),
+              disposition: Number(document?.disposition ?? cached?.disposition ?? 0),
+              hp: cached?.hp || freshState?.hp || { value: null, max: null, temp: 0 },
+              inCombat: Boolean(cached?.inCombat ?? freshState?.inCombat),
+              combatantId: String(cached?.combatantId || freshState?.combatantId || ""),
+              defeated: Boolean(cached?.defeated ?? freshState?.defeated),
+              isDeadLike: Boolean(cached?.isDeadLike ?? freshState?.isDeadLike),
+              conditions: cached?.conditions || freshState?.conditions || {},
+              effects: cached?.effects || freshState?.effects || [],
+              statusKeys: cached?.statusKeys || freshState?.statusKeys || [],
               distanceFt,
               orthDistanceFt,
               dxCells,
@@ -1007,6 +1166,17 @@ class FvttClient {
             gridType: Number(scene.grid?.type ?? 0),
             backgroundSrc,
             description: description.slice(0, 600),
+            combat: combat
+              ? {
+                  id: String(combat?.id || ""),
+                  sceneId: String(combat?.scene?.id || combat?.sceneId || ""),
+                  round: Number.isFinite(Number(combat?.round)) ? Number(combat.round) : 0,
+                  turn: Number.isFinite(Number(combat?.turn)) ? Number(combat.turn) : -1,
+                  started: Boolean(combat?.started),
+                  active: Boolean(combat?.active),
+                  ended: Boolean(combat?.ended),
+                }
+              : null,
           },
           actor: actor
             ? {
@@ -1213,6 +1383,98 @@ class FvttClient {
         };
       }
 
+      function normalizeStatusKey(value) {
+        return String(value || "")
+          .toLowerCase()
+          .trim()
+          .replace(/\s+/g, "")
+          .replace(/[^\p{L}\p{N}._-]+/gu, "");
+      }
+
+      function findCombatantForToken(tokenDoc, combat, combatants = []) {
+        if (!tokenDoc || !combat) return null;
+        const tokenId = String(tokenDoc?.id || tokenDoc?.tokenId || "");
+        const actorId = String(tokenDoc?.actorId || tokenDoc?.actor?.id || "");
+        for (const combatant of combatants) {
+          const combatantTokenId = String(combatant?.tokenId || combatant?.token?.id || "");
+          const combatantActorId = String(combatant?.actorId || combatant?.actor?.id || "");
+          if (tokenId && combatantTokenId && tokenId === combatantTokenId) return combatant;
+          if (actorId && combatantActorId && actorId === combatantActorId) return combatant;
+        }
+        return null;
+      }
+
+      function summarizeTokenState(tokenDoc, combatant) {
+        const actor = tokenDoc?.actor || game.actors.get(tokenDoc?.actorId) || null;
+        const hpRaw = actor?.system?.attributes?.hp ?? {};
+        const hpValue = Number(hpRaw?.value);
+        const hpMax = Number(hpRaw?.max);
+        const hpTemp = Number(hpRaw?.temp ?? 0);
+        const defeated = Boolean(combatant?.defeated || tokenDoc?.combatant?.defeated);
+
+        const statusSet = new Set();
+        const labels = [];
+        const labelSet = new Set();
+        const pushStatus = (raw) => {
+          const key = normalizeStatusKey(raw);
+          if (!key) return;
+          statusSet.add(key);
+        };
+        const pushLabel = (raw) => {
+          const label = String(raw || "").trim();
+          if (!label) return;
+          if (!labelSet.has(label)) {
+            labelSet.add(label);
+            labels.push(label);
+          }
+          pushStatus(label);
+        };
+        const pushIterable = (iterable) => {
+          if (!iterable || typeof iterable[Symbol.iterator] !== "function") return;
+          for (const entry of iterable) pushStatus(entry);
+        };
+
+        pushIterable(actor?.statuses);
+        pushIterable(tokenDoc?.statuses);
+        const activeEffects = Array.isArray(actor?.effects?.contents)
+          ? actor.effects.contents
+          : Array.isArray(actor?.effects)
+            ? actor.effects
+            : [];
+        for (const effect of activeEffects) {
+          if (!effect || effect.disabled === true) continue;
+          pushLabel(effect?.name || effect?.label || "");
+          pushIterable(effect?.statuses);
+        }
+
+        const statusKeys = Array.from(statusSet);
+        const hasStatus = (re) => statusKeys.some((key) => re.test(key));
+        const deadByStatus = hasStatus(/dead|defeat|dying|사망|죽음/);
+        const hpKnown = Number.isFinite(hpValue);
+        const hpZero = hpKnown && hpValue <= 0;
+
+        return {
+          hp: {
+            value: hpKnown ? hpValue : null,
+            max: Number.isFinite(hpMax) ? hpMax : null,
+            temp: Number.isFinite(hpTemp) ? hpTemp : 0,
+          },
+          defeated,
+          isDeadLike: hpZero || defeated || deadByStatus,
+          inCombat: Boolean(combatant),
+          combatantId: String(combatant?.id || ""),
+          conditions: {
+            concentrating: hasStatus(/concentr|집중/),
+            bleeding: hasStatus(/bleed|hemorr|출혈/),
+            dead: deadByStatus,
+            unconscious: hasStatus(/unconscious|기절|의식없|빈사/),
+          },
+          effects: labels.slice(0, 12),
+          statusKeys: statusKeys.slice(0, 20),
+          actorName: String(actor?.name || game.actors.get(tokenDoc?.actorId)?.name || ""),
+        };
+      }
+
       const actor = findActor();
       if (!actor) {
         return { ok: false, error: "Actor not found for combat state." };
@@ -1267,6 +1529,7 @@ class FvttClient {
       const turn = Number.isFinite(Number(combat.turn)) ? Number(combat.turn) : -1;
       const combatId = String(combat.id || "");
       const turnKey = combatId && currentCombatantId ? `${combatId}:${round}:${turn}:${currentCombatantId}` : "";
+      const combatActive = Boolean(combat && !combat?.ended && (combat?.started || combat?.active));
 
       const actorScene = scene || combat.scene || canvas?.scene || game.scenes.current || null;
       const actorToken = token || sceneTokens(actorScene).find((doc) => String(doc?.actorId || "") === actorIdText) || null;
@@ -1278,6 +1541,10 @@ class FvttClient {
               if (!tokenDoc) return false;
               if (String(tokenDoc.id || "") === String(actorToken?.id || "")) return false;
               if (Boolean(tokenDoc.hidden)) return false;
+              const combatant = findCombatantForToken(tokenDoc, combat, combatants);
+              const tokenState = summarizeTokenState(tokenDoc, combatant);
+              if (tokenState.isDeadLike) return false;
+              if (combatActive && actorCombatants.length > 0 && !tokenState.inCombat) return false;
               if (!actorToken) return true;
               const tokenDisposition = Number(tokenDoc?.disposition ?? 0);
               if (actorDisposition === 0 || tokenDisposition === 0) return true;
@@ -1285,13 +1552,22 @@ class FvttClient {
             })
             .map((tokenDoc) => {
               const info = distanceInfo(actorToken, tokenDoc, actorScene);
-              const actorName = tokenDoc.actor?.name || game.actors.get(tokenDoc.actorId)?.name || "";
+              const combatant = findCombatantForToken(tokenDoc, combat, combatants);
+              const tokenState = summarizeTokenState(tokenDoc, combatant);
               return {
                 id: String(tokenDoc.id || ""),
                 name: String(tokenDoc.name || tokenDoc.id || ""),
                 actorId: String(tokenDoc.actorId || ""),
-                actorName: String(actorName || ""),
+                actorName: tokenState.actorName,
                 disposition: Number(tokenDoc?.disposition ?? 0),
+                hp: tokenState.hp,
+                inCombat: tokenState.inCombat,
+                combatantId: tokenState.combatantId,
+                defeated: tokenState.defeated,
+                isDeadLike: tokenState.isDeadLike,
+                conditions: tokenState.conditions,
+                effects: tokenState.effects,
+                statusKeys: tokenState.statusKeys,
                 distanceFt: info.distanceFt,
                 orthDistanceFt: info.orthDistanceFt,
               };
@@ -1703,6 +1979,103 @@ class FvttClient {
           return { ok: true, scene: best.scene, token: best.token, autoResolved: null };
         }
 
+        function combatantsOf(combat) {
+          if (!combat) return [];
+          if (Array.isArray(combat.combatants?.contents)) return combat.combatants.contents;
+          if (Array.isArray(combat.combatants)) return combat.combatants;
+          return [];
+        }
+
+        function pickCombat(scene) {
+          const all = Array.isArray(game.combats?.contents) ? game.combats.contents : [];
+          if (!all.length) return null;
+          const sceneId = String(scene?.id || canvas?.scene?.id || game.scenes.current?.id || "");
+          const open = all.filter((combat) => !combat?.ended);
+          const byScene = open.filter((combat) => String(combat?.scene?.id || combat?.sceneId || "") === sceneId);
+          return (
+            game.combat ||
+            byScene.find((combat) => Boolean(combat?.started || combat?.active)) ||
+            byScene[0] ||
+            open.find((combat) => Boolean(combat?.started || combat?.active)) ||
+            open[0] ||
+            null
+          );
+        }
+
+        function findCombatantForToken(tokenDoc, combat) {
+          if (!tokenDoc || !combat) return null;
+          const tokenId = String(tokenDoc?.id || tokenDoc?.tokenId || "");
+          const actorId = String(tokenDoc?.actorId || tokenDoc?.actor?.id || "");
+          for (const combatant of combatantsOf(combat)) {
+            const combatantTokenId = String(combatant?.tokenId || combatant?.token?.id || "");
+            const combatantActorId = String(combatant?.actorId || combatant?.actor?.id || "");
+            if (tokenId && combatantTokenId && tokenId === combatantTokenId) return combatant;
+            if (actorId && combatantActorId && actorId === combatantActorId) return combatant;
+          }
+          return null;
+        }
+
+        function tokenHasDeadStatus(tokenDoc) {
+          const actor = tokenDoc?.actor || game.actors.get(tokenDoc?.actorId) || null;
+          const statuses = new Set();
+          const pushStatus = (raw) => {
+            const key = String(raw || "")
+              .toLowerCase()
+              .trim()
+              .replace(/\s+/g, "")
+              .replace(/[^\p{L}\p{N}._-]+/gu, "");
+            if (!key) return;
+            statuses.add(key);
+          };
+          const pushIterable = (iterable) => {
+            if (!iterable || typeof iterable[Symbol.iterator] !== "function") return;
+            for (const entry of iterable) pushStatus(entry);
+          };
+          pushIterable(actor?.statuses);
+          pushIterable(tokenDoc?.statuses);
+          const activeEffects = Array.isArray(actor?.effects?.contents)
+            ? actor.effects.contents
+            : Array.isArray(actor?.effects)
+              ? actor.effects
+              : [];
+          for (const effect of activeEffects) {
+            if (!effect || effect.disabled === true) continue;
+            pushStatus(effect?.name || effect?.label || "");
+            pushIterable(effect?.statuses);
+          }
+          return Array.from(statuses).some((key) => /dead|defeat|dying|사망|죽음/.test(key));
+        }
+
+        function isDeadLikeTarget(tokenDoc, combatant) {
+          const actor = tokenDoc?.actor || game.actors.get(tokenDoc?.actorId) || null;
+          const hp = actor?.system?.attributes?.hp ?? {};
+          const hpValue = Number(hp?.value);
+          const hpZero = Number.isFinite(hpValue) && hpValue <= 0;
+          const defeated = Boolean(combatant?.defeated || tokenDoc?.combatant?.defeated);
+          return hpZero || defeated || tokenHasDeadStatus(tokenDoc);
+        }
+
+        function validateTargetEligibility({ actorScene, actorToken, targetToken }) {
+          const combat = pickCombat(actorScene || targetToken?.parent || null);
+          const actorCombatant = findCombatantForToken(actorToken, combat);
+          const targetCombatant = findCombatantForToken(targetToken, combat);
+          if (isDeadLikeTarget(targetToken, targetCombatant)) {
+            return {
+              ok: false,
+              error: "Target is invalid: HP is 0 or the target is dead/defeated.",
+              errorCode: "TARGET_DEAD",
+            };
+          }
+          if (actorCombatant && combat && !targetCombatant) {
+            return {
+              ok: false,
+              error: "Target is not an active combat participant during combat.",
+              errorCode: "TARGET_NOT_IN_COMBAT",
+            };
+          }
+          return { ok: true };
+        }
+
         function summarizeTargets() {
           return Array.from(game.user?.targets || []).map((target) => {
             const document = target?.document || target;
@@ -1746,6 +2119,19 @@ class FvttClient {
           return {
             ok: false,
             error: `Target token is in a different scene (${targetResult.scene.name}) than actor token (${actorScene.name}).`,
+          };
+        }
+
+        const eligibility = validateTargetEligibility({
+          actorScene,
+          actorToken,
+          targetToken: targetResult.token,
+        });
+        if (!eligibility.ok) {
+          return {
+            ok: false,
+            error: eligibility.error,
+            errorCode: eligibility.errorCode || "TARGET_INVALID",
           };
         }
 
@@ -2030,6 +2416,82 @@ class FvttClient {
           return { ok: true, scene: best.scene, token: best.token, autoResolved: null };
         }
 
+        function combatantsOf(combat) {
+          if (!combat) return [];
+          if (Array.isArray(combat.combatants?.contents)) return combat.combatants.contents;
+          if (Array.isArray(combat.combatants)) return combat.combatants;
+          return [];
+        }
+
+        function pickCombat(scene) {
+          const all = Array.isArray(game.combats?.contents) ? game.combats.contents : [];
+          if (!all.length) return null;
+          const sceneId = String(scene?.id || canvas?.scene?.id || game.scenes.current?.id || "");
+          const open = all.filter((combat) => !combat?.ended);
+          const byScene = open.filter((combat) => String(combat?.scene?.id || combat?.sceneId || "") === sceneId);
+          return (
+            game.combat ||
+            byScene.find((combat) => Boolean(combat?.started || combat?.active)) ||
+            byScene[0] ||
+            open.find((combat) => Boolean(combat?.started || combat?.active)) ||
+            open[0] ||
+            null
+          );
+        }
+
+        function findCombatantForToken(tokenDoc, combat) {
+          if (!tokenDoc || !combat) return null;
+          const tokenId = String(tokenDoc?.id || tokenDoc?.tokenId || "");
+          const actorId = String(tokenDoc?.actorId || tokenDoc?.actor?.id || "");
+          for (const combatant of combatantsOf(combat)) {
+            const combatantTokenId = String(combatant?.tokenId || combatant?.token?.id || "");
+            const combatantActorId = String(combatant?.actorId || combatant?.actor?.id || "");
+            if (tokenId && combatantTokenId && tokenId === combatantTokenId) return combatant;
+            if (actorId && combatantActorId && actorId === combatantActorId) return combatant;
+          }
+          return null;
+        }
+
+        function tokenHasDeadStatus(tokenDoc) {
+          const actor = tokenDoc?.actor || game.actors.get(tokenDoc?.actorId) || null;
+          const statuses = new Set();
+          const pushStatus = (raw) => {
+            const key = String(raw || "")
+              .toLowerCase()
+              .trim()
+              .replace(/\s+/g, "")
+              .replace(/[^\p{L}\p{N}._-]+/gu, "");
+            if (!key) return;
+            statuses.add(key);
+          };
+          const pushIterable = (iterable) => {
+            if (!iterable || typeof iterable[Symbol.iterator] !== "function") return;
+            for (const entry of iterable) pushStatus(entry);
+          };
+          pushIterable(actor?.statuses);
+          pushIterable(tokenDoc?.statuses);
+          const activeEffects = Array.isArray(actor?.effects?.contents)
+            ? actor.effects.contents
+            : Array.isArray(actor?.effects)
+              ? actor.effects
+              : [];
+          for (const effect of activeEffects) {
+            if (!effect || effect.disabled === true) continue;
+            pushStatus(effect?.name || effect?.label || "");
+            pushIterable(effect?.statuses);
+          }
+          return Array.from(statuses).some((key) => /dead|defeat|dying|사망|죽음/.test(key));
+        }
+
+        function isDeadLikeTarget(tokenDoc, combatant) {
+          const actor = tokenDoc?.actor || game.actors.get(tokenDoc?.actorId) || null;
+          const hp = actor?.system?.attributes?.hp ?? {};
+          const hpValue = Number(hp?.value);
+          const hpZero = Number.isFinite(hpValue) && hpValue <= 0;
+          const defeated = Boolean(combatant?.defeated || tokenDoc?.combatant?.defeated);
+          return hpZero || defeated || tokenHasDeadStatus(tokenDoc);
+        }
+
         function summarizeTargets() {
           return Array.from(game.user?.targets || []).map((target) => {
             const document = target?.document || target;
@@ -2067,6 +2529,9 @@ class FvttClient {
         if (!actorPlaceable) {
           return { ok: false, error: "罹붾쾭?ㅼ뿉???≫꽣 ?좏겙??李얠? 紐삵뻽?듬땲??" };
         }
+
+        const combat = pickCombat(actorScene);
+        const actorCombatant = findCombatantForToken(actorToken, combat);
 
         const spec = rawAoeSpec && typeof rawAoeSpec === "object" ? rawAoeSpec : {};
         const shapeRaw = normalize(spec.shape || spec.type || "circle");
@@ -2108,6 +2573,21 @@ class FvttClient {
             return {
               ok: false,
               error: "踰붿쐞 以묒떖 ?좏겙???ㅻⅨ ?ъ뿉 ?덉뒿?덈떎. 媛숈? ?ъ쓽 ?좏겙留?吏?뺥븷 ???덉뒿?덈떎.",
+            };
+          }
+          const centerCombatant = findCombatantForToken(centerResolved.token, combat);
+          if (isDeadLikeTarget(centerResolved.token, centerCombatant)) {
+            return {
+              ok: false,
+              error: "Center target is invalid: HP is 0 or the target is dead/defeated.",
+              errorCode: "TARGET_DEAD",
+            };
+          }
+          if (actorCombatant && combat && !centerCombatant) {
+            return {
+              ok: false,
+              error: "Center target is not an active combat participant during combat.",
+              errorCode: "TARGET_NOT_IN_COMBAT",
             };
           }
           centerToken = centerResolved.token;
@@ -2157,6 +2637,9 @@ class FvttClient {
 
           if (!includeSelf && document.id === actorToken.id) continue;
           if (includeHostileOnly && Number(document.disposition ?? 0) !== -1) continue;
+          const targetCombatant = findCombatantForToken(document, combat);
+          if (isDeadLikeTarget(document, targetCombatant)) continue;
+          if (actorCombatant && combat && !targetCombatant) continue;
 
           const dx = Number(token.center.x) - centerPoint.x;
           const dy = Number(token.center.y) - centerPoint.y;
@@ -2636,7 +3119,7 @@ class FvttClient {
         return { scene: null, token: null };
       }
 
-      function summarizeActor(actor) {
+        function summarizeActor(actor) {
         const hp = actor.system?.attributes?.hp ?? {};
         const acValue = actor.system?.attributes?.ac?.value ?? actor.system?.attributes?.ac ?? null;
         const movement = actor.system?.attributes?.movement ?? {};
@@ -2723,20 +3206,61 @@ class FvttClient {
             return String(a.name).localeCompare(String(b.name), "ko");
           });
 
-        const spellSlotsRaw = actor.system?.spells ?? {};
-        const spellSlots = {};
-        for (const [key, slot] of Object.entries(spellSlotsRaw)) {
-          if (!slot || typeof slot !== "object") continue;
-          const value = Number(slot.value ?? 0);
-          const max = Number(slot.max ?? 0);
-          if (!Number.isFinite(value) || !Number.isFinite(max) || max <= 0) continue;
-          spellSlots[key] = { value, max };
-        }
+          const spellSlotsRaw = actor.system?.spells ?? {};
+          const spellSlots = {};
+          for (const [key, slot] of Object.entries(spellSlotsRaw)) {
+            if (!slot || typeof slot !== "object") continue;
+            const value = Number(slot.value ?? 0);
+            const max = Number(slot.max ?? 0);
+            if (!Number.isFinite(value) || !Number.isFinite(max) || max <= 0) continue;
+            spellSlots[key] = { value, max };
+          }
 
-        return {
-          id: actor.id,
-          name: actor.name,
-          type: actor.type,
+          const statusSet = new Set();
+          const labels = [];
+          const labelSet = new Set();
+          const pushStatus = (raw) => {
+            const key = String(raw || "")
+              .toLowerCase()
+              .trim()
+              .replace(/\s+/g, "")
+              .replace(/[^\p{L}\p{N}._-]+/gu, "");
+            if (!key) return;
+            statusSet.add(key);
+          };
+          const pushLabel = (raw) => {
+            const label = String(raw || "").trim();
+            if (!label) return;
+            if (!labelSet.has(label)) {
+              labelSet.add(label);
+              labels.push(label);
+            }
+            pushStatus(label);
+          };
+          const pushIterable = (iterable) => {
+            if (!iterable || typeof iterable[Symbol.iterator] !== "function") return;
+            for (const entry of iterable) pushStatus(entry);
+          };
+          pushIterable(actor?.statuses);
+          const effects = Array.isArray(actor?.effects?.contents)
+            ? actor.effects.contents
+            : Array.isArray(actor?.effects)
+              ? actor.effects
+              : [];
+          for (const effect of effects) {
+            if (!effect || effect.disabled === true) continue;
+            pushLabel(effect?.name || effect?.label || "");
+            pushIterable(effect?.statuses);
+          }
+          const statusKeys = Array.from(statusSet);
+          const hasStatus = (re) => statusKeys.some((key) => re.test(key));
+          const hpValueNum = Number(hp.value);
+          const hpZero = Number.isFinite(hpValueNum) && hpValueNum <= 0;
+
+          return {
+            id: actor.id,
+            name: actor.name,
+            type: actor.type,
           level,
           hp: {
             value: Number(hp.value ?? 0),
@@ -2755,15 +3279,23 @@ class FvttClient {
           },
           spellDc: spellDc !== null ? Number(spellDc) : null,
           spellSlots,
-          spells: {
-            count: spellItems.length,
-            preparedCount: spellItems.filter((spell) => spell.prepared).length,
-            items: spellItems.slice(0, 40),
-          },
-          abilities,
-          actions,
-        };
-      }
+            spells: {
+              count: spellItems.length,
+              preparedCount: spellItems.filter((spell) => spell.prepared).length,
+              items: spellItems.slice(0, 40),
+            },
+            conditions: {
+              concentrating: hasStatus(/concentr|집중/),
+              bleeding: hasStatus(/bleed|hemorr|출혈/),
+              dead: hasStatus(/dead|defeat|dying|사망|죽음/) || hpZero,
+              unconscious: hasStatus(/unconscious|기절|의식없|빈사/),
+            },
+            statusKeys: statusKeys.slice(0, 24),
+            effects: labels.slice(0, 16),
+            abilities,
+            actions,
+          };
+        }
 
       const actor = findActor();
       if (!actor) {
@@ -2941,6 +3473,47 @@ class FvttClient {
           spellSlots[key] = { value, max };
         }
 
+        const statusSet = new Set();
+        const labels = [];
+        const labelSet = new Set();
+        const pushStatus = (raw) => {
+          const key = String(raw || "")
+            .toLowerCase()
+            .trim()
+            .replace(/\s+/g, "")
+            .replace(/[^\p{L}\p{N}._-]+/gu, "");
+          if (!key) return;
+          statusSet.add(key);
+        };
+        const pushLabel = (raw) => {
+          const label = String(raw || "").trim();
+          if (!label) return;
+          if (!labelSet.has(label)) {
+            labelSet.add(label);
+            labels.push(label);
+          }
+          pushStatus(label);
+        };
+        const pushIterable = (iterable) => {
+          if (!iterable || typeof iterable[Symbol.iterator] !== "function") return;
+          for (const entry of iterable) pushStatus(entry);
+        };
+        pushIterable(actor?.statuses);
+        const effects = Array.isArray(actor?.effects?.contents)
+          ? actor.effects.contents
+          : Array.isArray(actor?.effects)
+            ? actor.effects
+            : [];
+        for (const effect of effects) {
+          if (!effect || effect.disabled === true) continue;
+          pushLabel(effect?.name || effect?.label || "");
+          pushIterable(effect?.statuses);
+        }
+        const statusKeys = Array.from(statusSet);
+        const hasStatus = (re) => statusKeys.some((key) => re.test(key));
+        const hpValueNum = Number(hp.value);
+        const hpZero = Number.isFinite(hpValueNum) && hpValueNum <= 0;
+
         return {
           id: actor.id,
           name: actor.name,
@@ -2968,6 +3541,14 @@ class FvttClient {
             preparedCount: spellItems.filter((spell) => spell.prepared).length,
             items: spellItems.slice(0, 40),
           },
+          conditions: {
+            concentrating: hasStatus(/concentr|집중/),
+            bleeding: hasStatus(/bleed|hemorr|출혈/),
+            dead: hasStatus(/dead|defeat|dying|사망|죽음/) || hpZero,
+            unconscious: hasStatus(/unconscious|기절|의식없|빈사/),
+          },
+          statusKeys: statusKeys.slice(0, 24),
+          effects: labels.slice(0, 16),
           actions,
         };
       }
@@ -3194,6 +3775,103 @@ class FvttClient {
           }
 
           return { ok: true, scene: best.scene, token: best.token, autoResolved: null };
+        }
+
+        function combatantsOf(combat) {
+          if (!combat) return [];
+          if (Array.isArray(combat.combatants?.contents)) return combat.combatants.contents;
+          if (Array.isArray(combat.combatants)) return combat.combatants;
+          return [];
+        }
+
+        function pickCombat(scene) {
+          const all = Array.isArray(game.combats?.contents) ? game.combats.contents : [];
+          if (!all.length) return null;
+          const sceneId = String(scene?.id || canvas?.scene?.id || game.scenes.current?.id || "");
+          const open = all.filter((combat) => !combat?.ended);
+          const byScene = open.filter((combat) => String(combat?.scene?.id || combat?.sceneId || "") === sceneId);
+          return (
+            game.combat ||
+            byScene.find((combat) => Boolean(combat?.started || combat?.active)) ||
+            byScene[0] ||
+            open.find((combat) => Boolean(combat?.started || combat?.active)) ||
+            open[0] ||
+            null
+          );
+        }
+
+        function findCombatantForToken(tokenDoc, combat) {
+          if (!tokenDoc || !combat) return null;
+          const tokenId = String(tokenDoc?.id || tokenDoc?.tokenId || "");
+          const actorId = String(tokenDoc?.actorId || tokenDoc?.actor?.id || "");
+          for (const combatant of combatantsOf(combat)) {
+            const combatantTokenId = String(combatant?.tokenId || combatant?.token?.id || "");
+            const combatantActorId = String(combatant?.actorId || combatant?.actor?.id || "");
+            if (tokenId && combatantTokenId && tokenId === combatantTokenId) return combatant;
+            if (actorId && combatantActorId && actorId === combatantActorId) return combatant;
+          }
+          return null;
+        }
+
+        function tokenHasDeadStatus(tokenDoc) {
+          const actor = tokenDoc?.actor || game.actors.get(tokenDoc?.actorId) || null;
+          const statuses = new Set();
+          const pushStatus = (raw) => {
+            const key = String(raw || "")
+              .toLowerCase()
+              .trim()
+              .replace(/\s+/g, "")
+              .replace(/[^\p{L}\p{N}._-]+/gu, "");
+            if (!key) return;
+            statuses.add(key);
+          };
+          const pushIterable = (iterable) => {
+            if (!iterable || typeof iterable[Symbol.iterator] !== "function") return;
+            for (const entry of iterable) pushStatus(entry);
+          };
+          pushIterable(actor?.statuses);
+          pushIterable(tokenDoc?.statuses);
+          const activeEffects = Array.isArray(actor?.effects?.contents)
+            ? actor.effects.contents
+            : Array.isArray(actor?.effects)
+              ? actor.effects
+              : [];
+          for (const effect of activeEffects) {
+            if (!effect || effect.disabled === true) continue;
+            pushStatus(effect?.name || effect?.label || "");
+            pushIterable(effect?.statuses);
+          }
+          return Array.from(statuses).some((key) => /dead|defeat|dying|사망|죽음/.test(key));
+        }
+
+        function isDeadLikeTarget(tokenDoc, combatant) {
+          const actor = tokenDoc?.actor || game.actors.get(tokenDoc?.actorId) || null;
+          const hp = actor?.system?.attributes?.hp ?? {};
+          const hpValue = Number(hp?.value);
+          const hpZero = Number.isFinite(hpValue) && hpValue <= 0;
+          const defeated = Boolean(combatant?.defeated || tokenDoc?.combatant?.defeated);
+          return hpZero || defeated || tokenHasDeadStatus(tokenDoc);
+        }
+
+        function validateTargetEligibility({ actorScene, actorToken, targetToken }) {
+          const combat = pickCombat(actorScene || targetToken?.parent || null);
+          const actorCombatant = findCombatantForToken(actorToken, combat);
+          const targetCombatant = findCombatantForToken(targetToken, combat);
+          if (isDeadLikeTarget(targetToken, targetCombatant)) {
+            return {
+              ok: false,
+              error: "Target is invalid: HP is 0 or the target is dead/defeated.",
+              errorCode: "TARGET_DEAD",
+            };
+          }
+          if (actorCombatant && combat && !targetCombatant) {
+            return {
+              ok: false,
+              error: "Target is not an active combat participant during combat.",
+              errorCode: "TARGET_NOT_IN_COMBAT",
+            };
+          }
+          return { ok: true };
         }
 
         function findActorBySelector() {
@@ -3642,6 +4320,19 @@ class FvttClient {
             return {
               ok: false,
               error: `Target token is in a different scene (${targetResult.scene.name}) than actor token (${actorScene.name}).`,
+            };
+          }
+
+          const eligibility = validateTargetEligibility({
+            actorScene,
+            actorToken,
+            targetToken: targetResult.token,
+          });
+          if (!eligibility.ok) {
+            return {
+              ok: false,
+              error: eligibility.error,
+              errorCode: eligibility.errorCode || "TARGET_INVALID",
             };
           }
 

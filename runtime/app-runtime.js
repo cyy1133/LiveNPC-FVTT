@@ -87,15 +87,29 @@ function normalizeImagePromptText(text) {
 }
 
 function buildImagePrompt({ npcName, baseTags, extraPrompt }) {
-  const chunks = [];
   const base = normalizeImagePromptText(baseTags);
   const extra = normalizeImagePromptText(extraPrompt);
-  if (base) chunks.push(base);
-  if (extra) chunks.push(extra);
-  if (!chunks.length) {
-    chunks.push(`${String(npcName || "NPC")} portrait, fantasy style, cinematic lighting`);
+  const rawTags = [];
+  if (base) rawTags.push(...base.split(","));
+  if (extra) rawTags.push(...extra.split(","));
+
+  const seen = new Set();
+  const deduped = [];
+  for (const raw of rawTags) {
+    const tag = normalizeImagePromptText(raw);
+    if (!tag) continue;
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(tag);
   }
-  return chunks.join(", ");
+
+  if (!deduped.length) {
+    deduped.push(`${String(npcName || "NPC")} portrait`);
+    deduped.push("fantasy style");
+    deduped.push("cinematic lighting");
+  }
+  return deduped.join(", ");
 }
 
 function escapeHtml(text) {
@@ -173,7 +187,7 @@ function pickEnabledNpcs(config) {
   return npcs;
 }
 
-function resolveNpcForDiscordMessage({ content, npcs, defaultNpcId }) {
+function resolveNpcForDiscordMessage({ content, npcs, defaultNpcId, allowSingleNpcFallback = true }) {
   const text = String(content || "");
   const lowered = safeLower(text);
 
@@ -201,7 +215,7 @@ function resolveNpcForDiscordMessage({ content, npcs, defaultNpcId }) {
   }
 
   // Heuristic 4: single NPC
-  if (npcs.length === 1) return npcs[0];
+  if (allowSingleNpcFallback && npcs.length === 1) return npcs[0];
 
   return null;
 }
@@ -219,6 +233,7 @@ function isLikelyFvttSystemMessage(content) {
   const text = String(content || "").replace(/\s+/g, " ").trim();
   if (!text) return true;
   const lower = text.toLowerCase();
+  if (/^[+-]?\d+(?:[.,]\d+)?$/.test(text)) return true;
 
   if (lower.includes("hp updated")) return true;
   if (lower.includes("apply undo")) return true;
@@ -226,6 +241,10 @@ function isLikelyFvttSystemMessage(content) {
   if (lower.includes("welcome to plutonium")) return true;
   if (lower.includes("saving throw")) return true;
   if (lower.includes("base damage")) return true;
+  if (/\battack\b.*\b1d20\b/i.test(text)) return true;
+  if (lower.includes("martial melee")) return true;
+  if (lower.includes("equipped proficient")) return true;
+  if (lower.includes("initiative")) return true;
 
   return false;
 }
@@ -262,9 +281,15 @@ async function loadPersonaBundle(npc) {
 
 async function loadSharedWorldBundle(config) {
   const docs = config?.npc?.sharedDocs || {};
-  const body = await readMaybe(docs.world);
-  if (!body.trim()) return "";
-  return `[WORLD_LORE.md]\n${body.trim()}`;
+  const [worldBody, battleRulesBody] = await Promise.all([readMaybe(docs.world), readMaybe(docs.battleRules)]);
+  const parts = [];
+  if (String(worldBody || "").trim()) {
+    parts.push(`[WORLD_LORE.md]\n${String(worldBody).trim()}`);
+  }
+  if (String(battleRulesBody || "").trim()) {
+    parts.push(`[BATTLE_RULES_SHARED.md]\n${String(battleRulesBody).trim()}`);
+  }
+  return parts.join("\n\n");
 }
 
 async function loadNpcPromptDocs({ config, npc }) {
@@ -385,6 +410,11 @@ function summarizeCurrentTargets(targetsLike) {
       name: String(target?.name || "").trim(),
       distanceFt: Number(target?.distanceFt),
       orthDistanceFt: Number(target?.orthDistanceFt),
+      hp: isPlainObject(target?.hp) ? target.hp : {},
+      inCombat: target?.inCombat,
+      defeated: Boolean(target?.defeated),
+      isDeadLike: Boolean(target?.isDeadLike),
+      conditions: isPlainObject(target?.conditions) ? target.conditions : {},
     }))
     .filter((target) => target.id || target.name);
   if (!targets.length) return ["- selected targets: none"];
@@ -398,8 +428,63 @@ function summarizeCurrentTargets(targetsLike) {
         : Number.isFinite(target.distanceFt)
           ? `${target.distanceFt}ft`
           : "?ft";
-    return `- target: ${name} (${id}) dist=${dist}`;
+    const hpText = formatTokenHpText(target);
+    const stateText = describeTokenState(target);
+    return `- target: ${name} (${id}) dist=${dist} hp=${hpText} state=${stateText}`;
   });
+}
+
+function formatTokenHpText(tokenLike) {
+  const hp = isPlainObject(tokenLike?.hp) ? tokenLike.hp : {};
+  const value = Number(hp.value);
+  const max = Number(hp.max);
+  const temp = Number(hp.temp ?? 0);
+  if (!Number.isFinite(value) || !Number.isFinite(max) || max <= 0) return "?/?";
+  return `${value}/${max}${Number.isFinite(temp) && temp > 0 ? `(+${temp})` : ""}`;
+}
+
+function buildTokenStateFlags(tokenLike) {
+  const flags = [];
+  const conditions = isPlainObject(tokenLike?.conditions) ? tokenLike.conditions : {};
+  if (isTokenDeadLike(tokenLike)) {
+    flags.push("deadlike");
+  }
+  if (conditions.unconscious) flags.push("unconscious");
+  if (conditions.concentrating) flags.push("concentrating");
+  if (conditions.bleeding) flags.push("bleeding");
+  if (tokenLike?.inCombat === true) flags.push("in-combat");
+  if (tokenLike?.inCombat === false) flags.push("out-of-combat");
+  return flags;
+}
+
+function describeTokenState(tokenLike) {
+  const flags = buildTokenStateFlags(tokenLike);
+  return flags.length ? flags.join(",") : "normal";
+}
+
+function isTokenDeadLike(tokenLike) {
+  if (!tokenLike || typeof tokenLike !== "object") return false;
+  if (Boolean(tokenLike.isDeadLike) || Boolean(tokenLike.defeated)) return true;
+  const conditions = isPlainObject(tokenLike.conditions) ? tokenLike.conditions : {};
+  if (conditions.dead) return true;
+  const hpValue = Number(tokenLike?.hp?.value);
+  return Number.isFinite(hpValue) && hpValue <= 0;
+}
+
+function isCombatActiveInSceneContext(sceneContext) {
+  const combat = sceneContext?.scene?.combat;
+  if (!isPlainObject(combat)) return false;
+  return !Boolean(combat.ended) && (Boolean(combat.active) || Boolean(combat.started));
+}
+
+function isTokenSelectableTarget(tokenLike, sceneContext, selfTokenId = "") {
+  const id = String(tokenLike?.id || "").trim();
+  if (!id) return false;
+  if (selfTokenId && id === selfTokenId) return false;
+  if (Boolean(tokenLike?.hidden)) return false;
+  if (isTokenDeadLike(tokenLike)) return false;
+  if (isCombatActiveInSceneContext(sceneContext) && tokenLike?.inCombat !== true) return false;
+  return true;
 }
 
 function parseDirectionFromText(text) {
@@ -454,6 +539,7 @@ function isLikelyActionRequest(text) {
 function findMentionedTokenByName(sceneContext, text) {
   const raw = String(text || "").toLowerCase();
   if (!raw) return null;
+  const selfTokenId = String(sceneContext?.actorToken?.id || "").trim();
   const tokens = ensureArray(sceneContext?.tokens)
     .map((token) => ({
       id: String(token?.id || "").trim(),
@@ -462,8 +548,15 @@ function findMentionedTokenByName(sceneContext, text) {
       dyCells: Number(token?.dyCells),
       orthDistanceFt: Number(token?.orthDistanceFt),
       distanceFt: Number(token?.distanceFt),
+      hidden: Boolean(token?.hidden),
+      inCombat: token?.inCombat,
+      defeated: Boolean(token?.defeated),
+      isDeadLike: Boolean(token?.isDeadLike),
+      hp: isPlainObject(token?.hp) ? token.hp : {},
+      conditions: isPlainObject(token?.conditions) ? token.conditions : {},
     }))
-    .filter((token) => token.id && token.name);
+    .filter((token) => token.id && token.name)
+    .filter((token) => isTokenSelectableTarget(token, sceneContext, selfTokenId));
 
   if (!tokens.length) return null;
 
@@ -1182,6 +1275,7 @@ function buildIntentFromActionTags(actions) {
 }
 
 function pickNearestTokenFromSceneContext(sceneContext) {
+  const selfTokenId = String(sceneContext?.actorToken?.id || "").trim();
   const tokens = ensureArray(sceneContext?.tokens)
     .map((token) => ({
       id: String(token?.id || "").trim(),
@@ -1192,8 +1286,13 @@ function pickNearestTokenFromSceneContext(sceneContext) {
       distanceFt: Number(token?.distanceFt),
       hidden: Boolean(token?.hidden),
       disposition: Number(token?.disposition),
+      inCombat: token?.inCombat,
+      defeated: Boolean(token?.defeated),
+      isDeadLike: Boolean(token?.isDeadLike),
+      hp: isPlainObject(token?.hp) ? token.hp : {},
+      conditions: isPlainObject(token?.conditions) ? token.conditions : {},
     }))
-    .filter((token) => token.id && !token.hidden);
+    .filter((token) => isTokenSelectableTarget(token, sceneContext, selfTokenId));
   if (!tokens.length) return null;
 
   const hostiles = tokens.filter((token) => Number.isFinite(token.disposition) && token.disposition < 0);
@@ -1335,12 +1434,29 @@ function formatDetailedSceneContext(sceneContext) {
       const orth = Number.isFinite(token.orthDistanceFt) ? `${token.orthDistanceFt}ft` : "unknown";
       const dx = Number.isFinite(token.dxCells) ? token.dxCells : "?";
       const dy = Number.isFinite(token.dyCells) ? token.dyCells : "?";
+      const hpText = formatTokenHpText(token);
+      const state = describeTokenState(token);
       lines.push(
-        `  - ${token.name} (${token.id}) pos=${token.x},${token.y} dist=${dist} orth=${orth} delta=(${dx},${dy})`
+        `  - ${token.name} (${token.id}) pos=${token.x},${token.y} dist=${dist} orth=${orth} delta=(${dx},${dy}) hp=${hpText} state=${state}`
       );
     }
   }
 
+  return lines;
+}
+
+function summarizeActorConditionLines(actorSheet) {
+  const conditions = isPlainObject(actorSheet?.actor?.conditions) ? actorSheet.actor.conditions : {};
+  const flags = [];
+  if (conditions.concentrating) flags.push("concentrating");
+  if (conditions.bleeding) flags.push("bleeding");
+  if (conditions.unconscious) flags.push("unconscious");
+  if (conditions.dead) flags.push("deadlike");
+  const effects = ensureArray(actorSheet?.actor?.effects).map((value) => String(value || "").trim()).filter(Boolean);
+
+  const lines = [];
+  lines.push(`- status flags: ${flags.length ? flags.join(", ") : "normal"}`);
+  lines.push(`- active effects: ${effects.length ? effects.slice(0, 8).join(", ") : "none"}`);
   return lines;
 }
 
@@ -1374,7 +1490,9 @@ function buildNpcPrompt({
       const orth = Number.isFinite(t?.orthDistanceFt) ? `${t.orthDistanceFt}ft` : "?ft";
       const dx = Number.isFinite(t?.dxCells) ? t.dxCells : "?";
       const dy = Number.isFinite(t?.dyCells) ? t.dyCells : "?";
-      return `- ${t?.name || "token"} (${t?.id || "?"}) dist=${dist} orth=${orth} dxy=(${dx},${dy})`;
+      const hpText = formatTokenHpText(t);
+      const stateText = describeTokenState(t);
+      return `- ${t?.name || "token"} (${t?.id || "?"}) dist=${dist} orth=${orth} dxy=(${dx},${dy}) hp=${hpText} state=${stateText}`;
     });
   const detailedSceneLines = formatDetailedSceneContext(fvttSceneContext);
 
@@ -1418,6 +1536,9 @@ function buildNpcPrompt({
     "- If you need awareness before acting, include inspect step first (context/sheet).",
     "- You must use actor resources below (spell slots, prepared spells, inventory, actions).",
     "- Never choose leveled spells with empty slots. Prefer cantrip/weapon if slots are depleted.",
+    "- During combat turns, respect action economy: at most one Action and one Bonus Action.",
+    "- Do not target creatures with HP 0, dead/defeated state, or targets not participating in active combat.",
+    "- Reflect current HP and status effects in tone and tactical decisions.",
     "- Use image intent/tag only if image generation is enabled in the context section below.",
     "",
     "Supported intents:",
@@ -1454,6 +1575,7 @@ function buildNpcPrompt({
       `- SD WebUI enabled for this NPC (size=${imageState.width}x${imageState.height})`,
       `- Default prompt: ${imageState.defaultPrompt || "(none)"}`,
       "- Use image tags sparingly (major emotion shift, battle start, dramatic scene transition).",
+      "- Image prompt should reflect current HP/status effects/combat tension when relevant.",
       '- Example: [[FVTT_ACTION {"type":"image","prompt":"grim expression, rain, close-up portrait","reason":"battle start"}]]',
       "- At most one image tag per reply unless user explicitly asks for multiple images.",
       ""
@@ -1501,6 +1623,7 @@ function buildNpcPrompt({
       Number.isFinite(Number(hp.value)) && Number.isFinite(Number(hp.max))
         ? `- hp: ${Number(hp.value)}/${Number(hp.max)} temp=${Number(hp.temp ?? 0)}`
         : "- hp: unknown";
+    const actorStatusLines = summarizeActorConditionLines(fvttActorSheet);
     const acLine = Number.isFinite(Number(fvttActorSheet?.actor?.ac))
       ? `- ac: ${Number(fvttActorSheet?.actor?.ac)}`
       : "- ac: unknown";
@@ -1517,6 +1640,7 @@ function buildNpcPrompt({
       "",
       "Actor resources:",
       hpLine,
+      ...actorStatusLines,
       acLine,
       moveLine,
       slotLine,
@@ -1553,12 +1677,22 @@ function buildNpcPrompt({
   return parts.join("\n");
 }
 
-function buildCombatTurnInboundText({ npcName, combatState } = {}) {
+function buildCombatTurnInboundText({ npcName, combatState, actorSheet, sceneContext } = {}) {
   const name = String(npcName || "NPC");
   const state = isPlainObject(combatState) ? combatState : {};
   const combat = isPlainObject(state?.combat) ? state.combat : {};
   const current = isPlainObject(state?.currentCombatant) ? state.currentCombatant : {};
-  const hostiles = ensureArray(state?.nearbyHostiles).slice(0, 4);
+  const hostiles = ensureArray(state?.nearbyHostiles)
+    .filter((token) => !isTokenDeadLike(token))
+    .filter((token) => !isCombatActiveInSceneContext(sceneContext) || token?.inCombat === true)
+    .slice(0, 6);
+  const hp = getActorHpSummary(actorSheet);
+  const actorConditions = isPlainObject(actorSheet?.actor?.conditions) ? actorSheet.actor.conditions : {};
+  const actorConditionFlags = [];
+  if (actorConditions.concentrating) actorConditionFlags.push("concentrating");
+  if (actorConditions.bleeding) actorConditionFlags.push("bleeding");
+  if (actorConditions.unconscious) actorConditionFlags.push("unconscious");
+  if (actorConditions.dead) actorConditionFlags.push("deadlike");
 
   const lines = [
     "[AUTO_COMBAT_TURN]",
@@ -1566,8 +1700,17 @@ function buildCombatTurnInboundText({ npcName, combatState } = {}) {
     "이번 턴에 합법적이고 실행 가능한 행동을 반드시 수행하세요.",
     "replyText는 턴 시작 대사로 짧게 작성하세요 (1~2문장).",
     "가능하면 적을 지정하고 공격/주문을 사용하세요. 사거리 밖이면 먼저 이동 후 공격하세요.",
+    "한 턴에 Action은 1회, Bonus Action은 1회만 사용하세요.",
+    "HP 0이거나 dead/defeated 상태의 대상은 절대 공격하지 마세요.",
+    "활성 전투 중에는 전투 참가자(in-combat)만 공격 대상으로 선택하세요.",
     "반드시 replyText 끝에 FVTT_ACTION 태그를 포함하세요.",
   ];
+
+  if (Number.isFinite(hp.value) && Number.isFinite(hp.max) && hp.max > 0) {
+    const percent = Math.round((hp.value / hp.max) * 100);
+    lines.push(`- Self HP: ${hp.value}/${hp.max} (temp=${hp.temp}, ${percent}%, ${hp.condition})`);
+  }
+  lines.push(`- Self conditions: ${actorConditionFlags.length ? actorConditionFlags.join(", ") : "normal"}`);
 
   const round = Number(combat.round ?? state.round);
   const turn = Number(combat.turn ?? state.turn);
@@ -1578,15 +1721,149 @@ function buildCombatTurnInboundText({ npcName, combatState } = {}) {
   }
 
   if (hostiles.length > 0) {
-    lines.push("- Nearby hostiles:");
+    lines.push("- Nearby hostiles (valid attack candidates):");
     for (const hostile of hostiles) {
       const dist = Number.isFinite(Number(hostile?.distanceFt)) ? `${Number(hostile.distanceFt)}ft` : "?ft";
-      lines.push(`  - ${String(hostile?.name || hostile?.id || "target")} (${String(hostile?.id || "?")}) dist=${dist}`);
+      const hpText = formatTokenHpText(hostile);
+      const stateText = describeTokenState(hostile);
+      lines.push(
+        `  - ${String(hostile?.name || hostile?.id || "target")} (${String(hostile?.id || "?")}) dist=${dist} hp=${hpText} state=${stateText}`
+      );
     }
+  } else {
+    lines.push("- Nearby hostiles (valid attack candidates): none");
   }
 
   lines.push('행동이 불가능하면 [[FVTT_ACTION {"type":"none"}]] 를 넣으세요.');
   return lines.join("\n");
+}
+
+function getActorHpSummary(actorSheet) {
+  const hp = isPlainObject(actorSheet?.actor?.hp) ? actorSheet.actor.hp : {};
+  const valueNum = Number(hp.value);
+  const maxNum = Number(hp.max);
+  const tempNum = Number(hp.temp ?? 0);
+  const hasValue = Number.isFinite(valueNum);
+  const hasMax = Number.isFinite(maxNum) && maxNum > 0;
+  const ratio = hasValue && hasMax ? Math.max(0, Math.min(1, valueNum / maxNum)) : null;
+
+  let condition = "unknown";
+  if (ratio !== null) {
+    if (ratio <= 0.2) condition = "critical";
+    else if (ratio <= 0.45) condition = "wounded";
+    else if (ratio <= 0.75) condition = "steady";
+    else condition = "healthy";
+  }
+
+  return {
+    value: hasValue ? valueNum : null,
+    max: hasMax ? maxNum : null,
+    temp: Number.isFinite(tempNum) ? tempNum : 0,
+    ratio,
+    condition,
+  };
+}
+
+function buildImageSituationPrompt({ actorSheet, sceneContext, combatState } = {}) {
+  const tags = [];
+  const hp = getActorHpSummary(actorSheet);
+  const conditions = isPlainObject(actorSheet?.actor?.conditions) ? actorSheet.actor.conditions : {};
+
+  if (Number.isFinite(hp.ratio)) {
+    if (hp.ratio <= 0.2) tags.push("badly wounded");
+    else if (hp.ratio <= 0.45) tags.push("wounded");
+    else if (hp.ratio >= 0.85) tags.push("battle-ready");
+  }
+
+  if (conditions.bleeding) tags.push("bleeding");
+  if (conditions.concentrating) tags.push("maintaining magical concentration");
+  if (conditions.unconscious || conditions.dead) tags.push("collapsed");
+
+  const combatActive =
+    Boolean(combatState?.inCombat) ||
+    (isCombatActiveInSceneContext(sceneContext) && Boolean(sceneContext?.scene?.combat));
+  if (combatActive) {
+    tags.push("active battle");
+  }
+
+  const nearbyHostiles = ensureArray(combatState?.nearbyHostiles).filter((token) => !isTokenDeadLike(token));
+  if (nearbyHostiles.length >= 3) tags.push("surrounded by enemies");
+  else if (nearbyHostiles.length > 0) tags.push("enemy nearby");
+
+  const effectTags = ensureArray(actorSheet?.actor?.effects)
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean)
+    .slice(0, 2);
+  for (const effect of effectTags) {
+    tags.push(effect);
+  }
+
+  return tags.join(", ");
+}
+
+function buildCombatEndInboundText({ npcName, prevCombatState, combatState, actorSheet } = {}) {
+  const name = String(npcName || "NPC");
+  const prev = isPlainObject(prevCombatState) ? prevCombatState : {};
+  const current = isPlainObject(combatState) ? combatState : {};
+  const prevCombat = isPlainObject(prev?.combat) ? prev.combat : {};
+  const hp = getActorHpSummary(actorSheet);
+  const conditions = isPlainObject(actorSheet?.actor?.conditions) ? actorSheet.actor.conditions : {};
+  const hostiles = ensureArray(current?.nearbyHostiles).filter((token) => !isTokenDeadLike(token)).slice(0, 4);
+
+  const lines = [
+    "[AUTO_COMBAT_END]",
+    `${name}의 전투가 방금 종료되었습니다.`,
+    "현재 HP 상태와 주변 위협 상황을 반영해서 전투 직후 짧은 대사만 하세요.",
+    "replyText는 1~2문장으로 작성하고 FVTT_ACTION 태그는 넣지 마세요.",
+  ];
+
+  const prevRound = Number(prevCombat.round ?? prev.round);
+  const prevTurn = Number(prevCombat.turn ?? prev.turn);
+  const prevCombatId = String(prevCombat.id || prev.combatId || "").trim();
+  if (prevCombatId) lines.push(`- Ended Combat Id: ${prevCombatId}`);
+  if (Number.isFinite(prevRound) && prevRound > 0) lines.push(`- Ended Round: ${prevRound}`);
+  if (Number.isFinite(prevTurn) && prevTurn >= 0) lines.push(`- Ended Turn Index: ${prevTurn}`);
+
+  if (Number.isFinite(hp.value) && Number.isFinite(hp.max) && hp.max > 0) {
+    const percent = Math.round((hp.value / hp.max) * 100);
+    lines.push(`- HP: ${hp.value}/${hp.max} (temp=${hp.temp}, ${percent}%)`);
+    lines.push(`- HP Condition: ${hp.condition}`);
+  }
+  const conditionFlags = [];
+  if (conditions.concentrating) conditionFlags.push("concentrating");
+  if (conditions.bleeding) conditionFlags.push("bleeding");
+  if (conditions.unconscious) conditionFlags.push("unconscious");
+  if (conditions.dead) conditionFlags.push("deadlike");
+  lines.push(`- Status effects: ${conditionFlags.length ? conditionFlags.join(", ") : "normal"}`);
+
+  if (hostiles.length > 0) {
+    lines.push("- Nearby hostiles after combat:");
+    for (const hostile of hostiles) {
+      const dist = Number.isFinite(Number(hostile?.distanceFt)) ? `${Number(hostile.distanceFt)}ft` : "?ft";
+      lines.push(`  - ${String(hostile?.name || hostile?.id || "target")} (${String(hostile?.id || "?")}) dist=${dist}`);
+    }
+  } else {
+    lines.push("- Nearby hostiles after combat: none");
+  }
+
+  return lines.join("\n");
+}
+
+function buildCombatEndFallbackSpeech({ npcName, actorSheet, combatState } = {}) {
+  const name = String(npcName || "NPC");
+  const hp = getActorHpSummary(actorSheet);
+  const conditions = isPlainObject(actorSheet?.actor?.conditions) ? actorSheet.actor.conditions : {};
+  const hostileCount = ensureArray(combatState?.nearbyHostiles).filter((h) => Number(h?.disposition) < 0).length;
+  if (conditions.dead || conditions.unconscious) return `${name}는 의식을 잃은 듯 휘청이며 제대로 말을 잇지 못한다.`;
+  if (conditions.bleeding) return `${name}는 흘러내리는 피를 지혈하며 거칠게 숨을 고른다.`;
+  if (Number.isFinite(hp.ratio)) {
+    if (hp.ratio <= 0.2) return `${name}는 비틀거리며 상처를 부여잡고 거친 숨을 몰아쉰다.`;
+    if (hp.ratio <= 0.45) return `${name}는 피 묻은 장비를 정리하며 전열을 다시 가다듬는다.`;
+    if (hp.ratio <= 0.75) return `${name}는 숨을 고르며 주변을 빠르게 훑어본다.`;
+  }
+  if (conditions.concentrating) return `${name}는 주문의 흐름을 붙잡은 채 주변 위협을 조심스럽게 살핀다.`;
+  if (hostileCount > 0) return `${name}는 경계를 풀지 않고 남은 위협이 있는지 주시한다.`;
+  return `${name}는 짧게 숨을 고르고 전투가 끝난 자리를 정리한다.`;
 }
 
 function normalizeIntent(output) {
@@ -1678,6 +1955,7 @@ class AppRuntime {
     this._fvttObserverInFlight = false;
     this._processedFvttMessageIds = new Set();
     this._processedCombatTurnKeysByNpc = new Map();
+    this._lastCombatStateByNpc = new Map();
     this._fvttInboundCutoffTs = 0;
     this._openAiScopeHintShown = false;
 
@@ -1775,6 +2053,7 @@ class AppRuntime {
     this._configRef = null;
     this._fvttInboundCutoffTs = 0;
     this._processedCombatTurnKeysByNpc.clear();
+    this._lastCombatStateByNpc.clear();
 
     if (this.discord) {
       try {
@@ -1898,6 +2177,7 @@ class AppRuntime {
     this._fvttObserverInFlight = false;
     this._processedFvttMessageIds.clear();
     this._processedCombatTurnKeysByNpc.clear();
+    this._lastCombatStateByNpc.clear();
   }
 
   async _pollFvttObservers(config) {
@@ -1970,6 +2250,7 @@ class AppRuntime {
       const speaker = String(msg?.speaker || "").trim();
       const content = String(msg?.content || "").trim();
       if (!content) continue;
+      if (msg?.isRoll) continue;
       if (isLikelyFvttSystemMessage(content)) continue;
 
       // Ignore messages that look like they came from an NPC (avoid loops).
@@ -1983,6 +2264,7 @@ class AppRuntime {
         content,
         npcs,
         defaultNpcId: "",
+        allowSingleNpcFallback: false,
       });
       if (!hitNpc) continue;
 
@@ -2000,6 +2282,28 @@ class AppRuntime {
       );
       await this.queue.catch(() => {});
     }
+  }
+
+  _captureCombatSnapshot(state) {
+    const safe = isPlainObject(state) ? state : {};
+    const combat = isPlainObject(safe?.combat) ? safe.combat : {};
+    return {
+      ok: Boolean(safe?.ok),
+      inCombat: Boolean(safe?.inCombat),
+      actorInCombat: Boolean(safe?.actorInCombat),
+      isActorTurn: Boolean(safe?.isActorTurn),
+      turnKey: String(safe?.turnKey || "").trim(),
+      round: Number(combat.round ?? safe?.round ?? 0),
+      turn: Number(combat.turn ?? safe?.turn ?? -1),
+      combatId: String(combat.id || "").trim(),
+      combat: {
+        id: String(combat.id || "").trim(),
+        sceneId: String(combat.sceneId || "").trim(),
+        sceneName: String(combat.sceneName || "").trim(),
+        round: Number(combat.round ?? safe?.round ?? 0),
+        turn: Number(combat.turn ?? safe?.turn ?? -1),
+      },
+    };
   }
 
   async _pollFvttCombatTurns(config) {
@@ -2037,6 +2341,40 @@ class AppRuntime {
         npcName,
         state: state || null,
       });
+
+      const prevSnapshot = this._lastCombatStateByNpc.get(npcKey) || null;
+      const currentSnapshot = this._captureCombatSnapshot(state);
+      this._lastCombatStateByNpc.set(npcKey, currentSnapshot);
+      if (this._lastCombatStateByNpc.size > 200) {
+        this._lastCombatStateByNpc.clear();
+      }
+
+      const combatJustEnded = Boolean(prevSnapshot?.actorInCombat) && currentSnapshot.ok && !currentSnapshot.actorInCombat;
+      if (combatJustEnded) {
+        this.log.info("combat", `combat ended -> ${npcName}`);
+        this._trace("fvtt.combat.end.trigger", {
+          npcId: npc?.id || "",
+          npcName,
+          prev: prevSnapshot,
+          current: currentSnapshot,
+        });
+        this.queue = this.queue.then(() =>
+          this._handleNpcCombatEnd({
+            config,
+            npc,
+            prevCombatState: prevSnapshot,
+            combatState: state,
+          })
+        );
+        await this.queue.catch((e) => {
+          this.log.warn("combat", `end speech failed (${npcName}): ${e?.message || e}`);
+          this._trace("fvtt.combat.end.error", {
+            npcId: npc?.id || "",
+            npcName,
+            error: e,
+          });
+        });
+      }
 
       if (!state?.ok) continue;
       if (!state?.inCombat) continue;
@@ -2078,7 +2416,7 @@ class AppRuntime {
   async _handleNpcCombatTurn({ config, npc, combatState }) {
     const npcName = String(npc?.displayName || npc?.id || "NPC");
     const turnKey = String(combatState?.turnKey || "").trim();
-    const text = buildCombatTurnInboundText({ npcName, combatState });
+    let text = buildCombatTurnInboundText({ npcName, combatState });
 
     this._trace("fvtt.combat.turn.handle.start", {
       npcId: npc?.id || "",
@@ -2113,6 +2451,13 @@ class AppRuntime {
         combatState,
       });
     }
+
+    text = buildCombatTurnInboundText({
+      npcName,
+      combatState,
+      actorSheet: fvttActorSheet,
+      sceneContext: fvttSceneContext,
+    });
 
     const prompt = buildNpcPrompt({
       npc,
@@ -2231,7 +2576,14 @@ class AppRuntime {
           strictExecution,
           turnKey,
         });
-        await this._executeIntentPlan({ config, npc, intent, origin: "combat-turn", strict: strictExecution });
+        await this._executeIntentPlan({
+          config,
+          npc,
+          intent,
+          origin: "combat-turn",
+          strict: strictExecution,
+          execution: { fvttActorSheet, combatState },
+        });
         this._trace("fvtt.intent.execute.done", {
           npcId: npc?.id || "",
           intentType: intent?.type || "none",
@@ -2260,6 +2612,37 @@ class AppRuntime {
         turnKey,
         result: endTurn,
       });
+      const needsAdvanceRetry =
+        !endTurn?.ok ||
+        (endTurn?.ok &&
+          !endTurn?.skipped &&
+          String(endTurn?.turnKeyAfter || "").trim() === String(endTurn?.turnKeyBefore || "").trim()) ||
+        (endTurn?.ok &&
+          endTurn?.skipped &&
+          !["turn-already-advanced", "not-actor-turn"].includes(String(endTurn?.reason || "")));
+
+      if (needsAdvanceRetry) {
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        const verify = await this._withNpcActor(npc, () => this.fvtt.getActorCombatState());
+        this._trace("fvtt.combat.turn.end.verify", {
+          npcId: npc?.id || "",
+          npcName,
+          turnKey,
+          state: verify || null,
+          firstResult: endTurn || null,
+        });
+        if (verify?.ok && verify?.isActorTurn && String(verify?.turnKey || "").trim() === turnKey) {
+          const retry = await this._withNpcActor(npc, () => this.fvtt.endActorCombatTurn(turnKey));
+          this._trace("fvtt.combat.turn.end.retry", {
+            npcId: npc?.id || "",
+            npcName,
+            turnKey,
+            result: retry || null,
+          });
+          if (retry?.ok) endTurn = retry;
+        }
+      }
+
       if (!endTurn?.ok) {
         this.log.warn("combat", `turn end failed (${npcName}): ${String(endTurn?.error || "unknown error")}`);
       }
@@ -2294,6 +2677,102 @@ class AppRuntime {
           turnKey,
         });
       }
+    }
+  }
+
+  async _handleNpcCombatEnd({ config, npc, prevCombatState, combatState }) {
+    const npcName = String(npc?.displayName || npc?.id || "NPC");
+    this._trace("fvtt.combat.end.handle.start", {
+      npcId: npc?.id || "",
+      npcName,
+      prevCombatState: prevCombatState || null,
+      combatState: combatState || null,
+    });
+
+    const personaText = await loadNpcPromptDocs({ config, npc });
+    let fvttChatContext = [];
+    let fvttSceneContext = null;
+    let fvttActorSheet = null;
+
+    try {
+      const chat = await this.fvtt.getRecentChat(10);
+      if (chat?.ok) fvttChatContext = chat.messages || [];
+      fvttSceneContext = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(60));
+      fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet());
+    } catch (e) {
+      this.log.warn("combat", `end context build failed (${npcName}): ${e?.message || e}`);
+      this._trace("fvtt.combat.end.context.error", { npcId: npc?.id || "", npcName, error: e });
+    }
+
+    const inboundText = buildCombatEndInboundText({
+      npcName,
+      prevCombatState,
+      combatState,
+      actorSheet: fvttActorSheet,
+    });
+
+    const prompt = buildNpcPrompt({
+      npc,
+      inboundText,
+      fvttReady: true,
+      personaText,
+      fvttChatContext,
+      fvttSceneContext,
+      fvttActorSheet,
+      mentionedSceneTokens: ensureArray(combatState?.nearbyHostiles).slice(0, 4),
+      imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
+    });
+
+    let replyText = "";
+    try {
+      const completion = await this._completeNpcJson({
+        config,
+        prompt,
+        timeoutMs: 60_000,
+        traceMeta: {
+          origin: "combat-end",
+          npcId: npc?.id || "",
+          npcName,
+        },
+      });
+      const normalized = normalizeIntent(completion.parsed);
+      const actionTag = extractFvttActionTags(normalized.replyText);
+      replyText = actionTag.hadTag ? actionTag.visibleText || "" : String(normalized.replyText || "");
+      this._trace("llm.intent.combat.end", {
+        npcId: npc?.id || "",
+        npcName,
+        replyText,
+        normalizedIntent: normalized.intent,
+        actionTag,
+      });
+    } catch (e) {
+      this.log.warn("llm", `LLM failed (combat end): ${e?.message || e}`);
+      this._trace("llm.error.combat.end", { npcId: npc?.id || "", npcName, error: e });
+    }
+
+    const speech = String(replyText || "").trim() || buildCombatEndFallbackSpeech({
+      npcName,
+      actorSheet: fvttActorSheet,
+      combatState,
+    });
+    if (!speech) return;
+
+    try {
+      await this._withNpcActor(npc, () => this.fvtt.speakAsActor(speech));
+      this._trace("fvtt.speak.outbound", {
+        npcId: npc?.id || "",
+        npcName,
+        text: speech,
+        origin: "combat-end",
+      });
+    } catch (e) {
+      this.log.warn("combat", `end speech failed (${npcName}): ${e?.message || e}`);
+      this._trace("fvtt.speak.error", {
+        npcId: npc?.id || "",
+        npcName,
+        error: e,
+        origin: "combat-end",
+      });
     }
   }
 
@@ -2914,6 +3393,12 @@ class AppRuntime {
     if (lower.includes("different scene")) {
       return "대상 토큰이 다른 장면에 있어서 실행할 수 없습니다. NPC와 대상을 같은 장면에 두고 다시 시도해 주세요.";
     }
+    if (lower.includes("target_dead") || lower.includes("hp is 0") || lower.includes("dead/defeated")) {
+      return "대상이 이미 전투 불능 상태(HP 0 또는 사망/패배 상태)라 공격할 수 없습니다. 다른 대상을 지정해 주세요.";
+    }
+    if (lower.includes("target_not_in_combat") || lower.includes("not an active combat participant")) {
+      return "현재 전투에 참여하지 않은 대상은 공격할 수 없습니다. 전투 참가 중인 대상을 지정해 주세요.";
+    }
     if (lower.includes("actor token is not available on any scene") || lower.includes("no token on scene")) {
       return "NPC 토큰이 장면에 없어 실행할 수 없습니다. 토큰을 배치한 뒤 다시 시도해 주세요.";
     }
@@ -3071,12 +3556,143 @@ class AppRuntime {
       .slice(0, 8);
   }
 
-  async _executeIntentPlan({ config, npc, intent, origin, strict = false }) {
-    const steps = this._expandIntentToSteps(intent);
+  _normalizeActionActivation(value) {
+    const raw = String(value || "").toLowerCase().trim();
+    if (!raw) return "action";
+    if (raw.includes("bonus")) return "bonus";
+    if (raw.includes("reaction")) return "reaction";
+    if (raw.includes("special")) return "special";
+    if (raw.includes("action")) return "action";
+    return "action";
+  }
+
+  _buildActorActionActivationIndex(fvttActorSheet) {
+    const index = new Map();
+    const actions = ensureArray(fvttActorSheet?.actor?.actions);
+    for (const action of actions) {
+      const name = String(action?.name || "").trim();
+      if (!name) continue;
+      const key = normalizeTokenKey(name);
+      if (!key) continue;
+      if (!index.has(key)) {
+        index.set(key, this._normalizeActionActivation(action?.activation));
+      }
+    }
+    return index;
+  }
+
+  _resolveCombatStepActivation(step, activationIndex) {
+    const type = String(step?.type || "").toLowerCase();
+    if (!["action", "tokenaction", "aoe"].includes(type)) return "";
+
+    const args = isPlainObject(step?.args) ? step.args : {};
+    const actionName = String(args.actionName || "").trim();
+    if (!actionName) return "action";
+
+    const key = normalizeTokenKey(actionName);
+    if (key && activationIndex.has(key)) {
+      return this._normalizeActionActivation(activationIndex.get(key));
+    }
+
+    if (key) {
+      for (const [candidateKey, candidateActivation] of activationIndex.entries()) {
+        if (!candidateKey) continue;
+        if (candidateKey.includes(key) || key.includes(candidateKey)) {
+          return this._normalizeActionActivation(candidateActivation);
+        }
+      }
+    }
+
+    if (/(보너스|bonus)/i.test(actionName)) return "bonus";
+    return "action";
+  }
+
+  _applyCombatTurnStepBudget({ steps, fvttActorSheet }) {
+    const list = ensureArray(steps);
+    const activationIndex = this._buildActorActionActivationIndex(fvttActorSheet);
+    const limits = { move: 1, action: 1, bonus: 1 };
+    const usage = { move: 0, action: 0, bonus: 0 };
+    const kept = [];
+    const skipped = [];
+
+    for (let i = 0; i < list.length; i += 1) {
+      const step = list[i];
+      const type = String(step?.type || "").toLowerCase();
+      if (!type) continue;
+
+      if (type === "move" || type === "tokenmove") {
+        if (usage.move >= limits.move) {
+          skipped.push({ index: i + 1, type, reason: "move-budget-exceeded" });
+          continue;
+        }
+        usage.move += 1;
+        kept.push(step);
+        continue;
+      }
+
+      if (type === "action" || type === "tokenaction" || type === "aoe") {
+        const activation = this._resolveCombatStepActivation(step, activationIndex);
+        if (activation === "reaction") {
+          skipped.push({
+            index: i + 1,
+            type,
+            activation,
+            reason: "reaction-not-on-own-turn",
+          });
+          continue;
+        }
+        const budgetKey = activation === "bonus" ? "bonus" : "action";
+        if (usage[budgetKey] >= limits[budgetKey]) {
+          skipped.push({
+            index: i + 1,
+            type,
+            activation,
+            reason: `${budgetKey}-budget-exceeded`,
+          });
+          continue;
+        }
+        usage[budgetKey] += 1;
+        kept.push(step);
+        continue;
+      }
+
+      kept.push(step);
+    }
+
+    return { steps: kept, limits, usage, skipped };
+  }
+
+  async _executeIntentPlan({ config, npc, intent, origin, strict = false, execution = {} }) {
+    let steps = this._expandIntentToSteps(intent);
     if (!steps.length) return;
+    const normalizedOrigin = String(origin || "").trim();
+
+    if (normalizedOrigin === "combat-turn") {
+      const budgeted = this._applyCombatTurnStepBudget({
+        steps,
+        fvttActorSheet: execution?.fvttActorSheet || null,
+      });
+      steps = budgeted.steps;
+      this._trace("fvtt.combat.turn.economy", {
+        npcId: npc?.id || "",
+        limits: budgeted.limits,
+        usage: budgeted.usage,
+        skipped: budgeted.skipped,
+        plannedSteps: steps,
+      });
+      if (budgeted.skipped.length > 0) {
+        this.log.info(
+          "combat",
+          `turn economy filtered: ${budgeted.skipped.map((entry) => `${entry.type}:${entry.reason}`).join(", ")}`
+        );
+      }
+      if (!steps.length) return;
+    }
+
+    const runtimeState = { moveConsumed: false };
 
     this._trace("fvtt.plan.start", {
-      origin: String(origin || ""),
+      origin: normalizedOrigin,
       npcId: npc?.id || "",
       intentType: String(intent?.type || ""),
       strict: Boolean(strict),
@@ -3084,46 +3700,79 @@ class AppRuntime {
     });
 
     if (steps.length === 1) {
-      await this._executeNpcIntent({ config, npc, intent: steps[0], strict });
+      const executionHint = {
+        origin: normalizedOrigin,
+        allowAutoApproach: !runtimeState.moveConsumed,
+      };
+      const result = await this._executeNpcIntent({
+        config,
+        npc,
+        intent: steps[0],
+        strict,
+        execution: executionHint,
+      });
+      if (result?.moveConsumed) runtimeState.moveConsumed = true;
       this._trace("fvtt.plan.done", {
-        origin: String(origin || ""),
+        origin: normalizedOrigin,
         npcId: npc?.id || "",
         strict: Boolean(strict),
         stepsCount: 1,
+        moveConsumed: runtimeState.moveConsumed,
       });
       return;
     }
 
-    this.log.info("fvtt", `plan(${origin || "msg"}): ${steps.map((s) => s.type).join(" -> ")}`);
+    this.log.info("fvtt", `plan(${normalizedOrigin || "msg"}): ${steps.map((s) => s.type).join(" -> ")}`);
     for (let i = 0; i < steps.length; i += 1) {
       const step = steps[i];
+      const executionHint = {
+        origin: normalizedOrigin,
+        allowAutoApproach: !runtimeState.moveConsumed,
+      };
       this.log.info("fvtt", `plan step ${i + 1}/${steps.length}: ${step.type}`);
       this._trace("fvtt.plan.step.start", {
-        origin: String(origin || ""),
+        origin: normalizedOrigin,
         npcId: npc?.id || "",
         index: i + 1,
         total: steps.length,
         step,
         strict: Boolean(strict),
+        execution: {
+          moveConsumed: runtimeState.moveConsumed,
+          allowAutoApproach: executionHint.allowAutoApproach,
+        },
       });
-      await this._executeNpcIntent({ config, npc, intent: step, strict });
+      const result = await this._executeNpcIntent({
+        config,
+        npc,
+        intent: step,
+        strict,
+        execution: executionHint,
+      });
+      if (result?.moveConsumed) runtimeState.moveConsumed = true;
       this._trace("fvtt.plan.step.done", {
-        origin: String(origin || ""),
+        origin: normalizedOrigin,
         npcId: npc?.id || "",
         index: i + 1,
         total: steps.length,
         stepType: step?.type || "",
         strict: Boolean(strict),
+        execution: {
+          moveConsumed: runtimeState.moveConsumed,
+          allowAutoApproach: executionHint.allowAutoApproach,
+        },
+        result,
       });
       if (i + 1 < steps.length) {
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
     }
     this._trace("fvtt.plan.done", {
-      origin: String(origin || ""),
+      origin: normalizedOrigin,
       npcId: npc?.id || "",
       strict: Boolean(strict),
       stepsCount: steps.length,
+      moveConsumed: runtimeState.moveConsumed,
     });
   }
 
@@ -3393,19 +4042,14 @@ class AppRuntime {
       const scene = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(30));
       if (!scene?.ok) return null;
 
+      const selfTokenId = String(scene?.actorToken?.id || "").trim();
       const selected = ensureArray(scene.targets)
+        .filter((token) => isTokenSelectableTarget(token, scene, selfTokenId))
         .map((t) => String(t?.id || "").trim())
         .find(Boolean);
       if (selected) return selected;
 
-      const selfTokenId = String(scene?.actorToken?.id || "").trim();
-      const tokens = ensureArray(scene.tokens).filter((token) => {
-        const id = String(token?.id || "").trim();
-        if (!id) return false;
-        if (selfTokenId && id === selfTokenId) return false;
-        if (Boolean(token?.hidden)) return false;
-        return true;
-      });
+      const tokens = ensureArray(scene.tokens).filter((token) => isTokenSelectableTarget(token, scene, selfTokenId));
       if (!tokens.length) return null;
 
       const hostiles = tokens.filter((token) => Number(token?.disposition) < 0);
@@ -3475,10 +4119,28 @@ class AppRuntime {
       args?.prompt || args?.extraPrompt || args?.promptText || args?.tags || args?.text || ""
     );
     const reasonText = normalizeImagePromptText(args?.reason || args?.trigger || args?.context || "");
+    let imageActorSheet = null;
+    let imageSceneContext = null;
+    let imageCombatState = null;
+    if (this.fvtt) {
+      try {
+        imageActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet());
+        imageSceneContext = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(30));
+        imageCombatState = await this._withNpcActor(npc, () => this.fvtt.getActorCombatState());
+      } catch {
+        // Ignore context fetch failures and continue with provided prompt.
+      }
+    }
+    const situationPrompt = buildImageSituationPrompt({
+      actorSheet: imageActorSheet,
+      sceneContext: imageSceneContext,
+      combatState: imageCombatState,
+    });
+    const mergedExtraPrompt = [extraPrompt, situationPrompt].filter(Boolean).join(", ");
     const finalPrompt = buildImagePrompt({
       npcName,
       baseTags: state.defaultPrompt,
-      extraPrompt,
+      extraPrompt: mergedExtraPrompt,
     });
     const endpoint = `${state.webuiUrl}/sdapi/v1/txt2img`;
 
@@ -3489,6 +4151,8 @@ class AppRuntime {
       width: state.width,
       height: state.height,
       reason: reasonText,
+      userPrompt: compact(extraPrompt, 240),
+      situationPrompt: compact(situationPrompt, 240),
       prompt: compact(finalPrompt, 280),
     });
 
@@ -3568,9 +4232,10 @@ class AppRuntime {
     };
   }
 
-  async _executeNpcIntent({ config, npc, intent, strict = false }) {
+  async _executeNpcIntent({ config, npc, intent, strict = false, execution = {} }) {
     const type = String(intent?.type || "none").toLowerCase();
     const args = isPlainObject(intent?.args) ? intent.args : {};
+    const allowAutoApproach = execution?.allowAutoApproach !== false;
 
     if (!this.fvtt) throw new Error("FVTT not configured");
     this._trace("fvtt.intent.step", {
@@ -3578,6 +4243,10 @@ class AppRuntime {
       type,
       args,
       strict: Boolean(strict),
+      execution: {
+        allowAutoApproach,
+        origin: String(execution?.origin || ""),
+      },
     });
 
     if (type === "inspect") {
@@ -3586,38 +4255,38 @@ class AppRuntime {
         const sheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet());
         this.log.info("fvtt", `sheet ok=${sheet?.ok}`);
         this._trace("fvtt.inspect.result", { npcId: npc?.id || "", what, result: sheet });
-        return;
+        return { moveConsumed: false };
       }
       if (what === "context") {
         const ctx = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(20));
         this.log.info("fvtt", `context ok=${ctx?.ok}`);
         this._trace("fvtt.inspect.result", { npcId: npc?.id || "", what, result: ctx });
-        return;
+        return { moveConsumed: false };
       }
       if (what === "chatlog") {
         const log = await this.fvtt.getRecentChat(10);
         this.log.info("fvtt", `chatlog ok=${log?.ok}`);
         this._trace("fvtt.inspect.result", { npcId: npc?.id || "", what, result: log });
-        return;
+        return { moveConsumed: false };
       }
-      return;
+      return { moveConsumed: false };
     }
 
     if (type === "image") {
       await this._executeNpcImageIntent({ config, npc, args, strict });
-      return;
+      return { moveConsumed: false };
     }
 
     if (type === "targetset") {
       const tokenRef = String(args.tokenRef || args.targetTokenRef || args.targetRef || "").trim();
-      if (!tokenRef) return;
+      if (!tokenRef) return { moveConsumed: false };
       const result = await this._withNpcActor(npc, () => this.fvtt.setActorTarget(tokenRef));
       this._trace("fvtt.targetset.response", { npcId: npc?.id || "", tokenRef, result });
       if (!result?.ok) {
         throw new Error(String(result?.error || "targetset failed"));
       }
       this.log.info("fvtt", `target set: ${tokenRef}`);
-      return;
+      return { moveConsumed: false };
     }
 
     if (type === "targetclear") {
@@ -3627,7 +4296,7 @@ class AppRuntime {
         throw new Error(String(result?.error || "targetclear failed"));
       }
       this.log.info("fvtt", "targets cleared");
-      return;
+      return { moveConsumed: false };
     }
 
     if (type === "move") {
@@ -3707,7 +4376,7 @@ class AppRuntime {
         "fvtt",
         `move ok: direction=${direction} amount=${move.amount}${unit}${Number.isFinite(finalX) && Number.isFinite(finalY) ? ` -> (${finalX},${finalY})` : ""}`
       );
-      return;
+      return { moveConsumed: true };
     }
 
     if (type === "tokenmove") {
@@ -3734,7 +4403,7 @@ class AppRuntime {
         throw new Error([result?.error || "tokenmove failed", detail].filter(Boolean).join(" | "));
       }
       this.log.info("fvtt", `tokenmove ok: ${tokenRef} ${direction}${move.amount}${move.unit}`);
-      return;
+      return { moveConsumed: true };
     }
 
     if (type === "action") {
@@ -3751,8 +4420,13 @@ class AppRuntime {
         npcId: npc?.id || "",
         actionName,
         targetTokenRef: targetTokenRef || "",
+        allowAutoApproach,
       });
-      const result = await this._withNpcActor(npc, () => this.fvtt.useActorActionSmart(actionName, targetTokenRef));
+      const result = await this._withNpcActor(npc, () =>
+        allowAutoApproach
+          ? this.fvtt.useActorActionSmart(actionName, targetTokenRef)
+          : this.fvtt.useActorAction(actionName, targetTokenRef)
+      );
       this._trace("fvtt.action.response", { npcId: npc?.id || "", result });
       let finalResult = result;
       if (!result?.ok) {
@@ -3814,7 +4488,11 @@ class AppRuntime {
         "fvtt",
         `action ok: ${resolvedAction}${resolvedTarget ? ` -> ${resolvedTarget}` : ""}${finalResult?.autoResolved ? ` (${finalResult.autoResolved})` : ""}`
       );
-      return;
+      return {
+        moveConsumed: Boolean(finalResult?.approach?.moved),
+        actionActivation: this._normalizeActionActivation(finalResult?.action?.activation),
+        actionName: resolvedAction,
+      };
     }
 
     if (type === "tokenaction") {
@@ -3831,9 +4509,12 @@ class AppRuntime {
         tokenRef,
         actionName,
         targetTokenRef: targetTokenRef || "",
+        allowAutoApproach,
       });
       const result = await this._withNpcActor(npc, () =>
-        this.fvtt.useTokenActionSmart(tokenRef, actionName, targetTokenRef)
+        allowAutoApproach
+          ? this.fvtt.useTokenActionSmart(tokenRef, actionName, targetTokenRef)
+          : this.fvtt.useTokenAction(tokenRef, actionName, targetTokenRef)
       );
       this._trace("fvtt.tokenaction.response", { npcId: npc?.id || "", result });
       if (!result?.ok) {
@@ -3846,14 +4527,18 @@ class AppRuntime {
         "fvtt",
         `tokenaction ok: ${tokenRef} ${resolvedAction}${resolvedTarget ? ` -> ${resolvedTarget}` : ""}`
       );
-      return;
+      return {
+        moveConsumed: Boolean(result?.approach?.moved),
+        actionActivation: this._normalizeActionActivation(result?.action?.activation),
+        actionName: resolvedAction,
+      };
     }
 
     if (type === "aoe") {
       const actionName = String(args.actionName || "").trim();
       if (!actionName) {
         if (strict) throw new Error("aoe failed: actionName is missing");
-        return;
+        return { moveConsumed: false };
       }
       let centerTokenRef = String(args.centerTokenRef || "").trim() || null;
       if (!strict && !centerTokenRef) {
@@ -3886,8 +4571,14 @@ class AppRuntime {
         "fvtt",
         `aoe ok: ${actionName}${centerTokenRef ? ` center=${centerTokenRef}` : ""}${result?.autoResolved ? ` (${result.autoResolved})` : ""}`
       );
-      return;
+      return {
+        moveConsumed: false,
+        actionActivation: this._normalizeActionActivation(result?.action?.activation),
+        actionName,
+      };
     }
+
+    return { moveConsumed: false };
   }
 
   // Expose OAuth login for future GUI integration

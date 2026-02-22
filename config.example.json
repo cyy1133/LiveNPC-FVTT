@@ -55,7 +55,8 @@
     "difficultTerrainMultiplier": 2,
     "defaultNpcId": "diana",
     "sharedDocs": {
-      "world": ".\\persona-defaults\\world.md"
+      "world": ".\\persona-defaults\\world.md",
+      "battleRules": ".\\persona-defaults\\dnd5e-battle-rules.md"
     }
   },
   "npcs": [

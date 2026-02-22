@@ -27,6 +27,36 @@ const FALLBACK_BATTLE_MD = `# Battle Pattern (Default)
 5. Avoid wasting turns; always end with the most effective valid action.
 `;
 
+const FALLBACK_DND5E_BATTLE_RULES_MD = `# DND5e Battle Rules (Shared)
+
+These are hard constraints for all NPC battle decisions.
+
+1. Action economy per turn:
+- Movement: up to speed once per turn.
+- Action: at most 1.
+- Bonus Action: at most 1, and only when a valid feature/spell allows it.
+- Reaction: not part of normal turn sequence; usually outside own turn.
+
+2. Do not perform two Action-cost activities in one turn.
+- Example: weapon attack + Vicious Mockery (both Action) is normally illegal in the same turn.
+
+3. Concentration:
+- A creature can concentrate on only one spell at a time.
+- Casting another concentration spell ends the previous concentration.
+- If concentration is active, avoid replacing it unless tactically necessary.
+
+4. Target validity:
+- Do not target creatures with HP 0, defeated/dead/dying conditions, or otherwise removed from combat.
+- During active combat, hostile targets should be selected from active combat participants.
+
+5. Resource validity:
+- Leveled spells require available spell slots.
+- If slots are unavailable, prefer cantrip/weapon/action alternatives.
+
+6. End-turn discipline:
+- If no legal effective action remains, end the turn.
+`;
+
 const DEFAULT_DIANA_IMAGE_TAGS = "female knight, dark fantasy, dramatic lighting, full body";
 
 function getDefaultConfigPath(appDataDir) {
@@ -64,18 +94,21 @@ async function ensureDefaultPersonaFiles(baseDir) {
     world: path.join(dir, "world.md"),
     npc: path.join(dir, "npc.md"),
     battle: path.join(dir, "battlePattern.md"),
+    battleRules: path.join(dir, "dnd5e-battle-rules.md"),
   };
 
-  const [worldTpl, npcTpl, battleTpl] = await Promise.all([
+  const [worldTpl, npcTpl, battleTpl, sharedBattleRulesTpl] = await Promise.all([
     readTemplateOrFallback("world.md", FALLBACK_WORLD_MD),
     readTemplateOrFallback("npc.md", FALLBACK_NPC_MD),
     readTemplateOrFallback("battlePattern.md", FALLBACK_BATTLE_MD),
+    readTemplateOrFallback("dnd5e-battle-rules.md", FALLBACK_DND5E_BATTLE_RULES_MD),
   ]);
 
   await Promise.all([
     writeFileIfMissing(out.world, worldTpl),
     writeFileIfMissing(out.npc, npcTpl),
     writeFileIfMissing(out.battle, battleTpl),
+    writeFileIfMissing(out.battleRules, sharedBattleRulesTpl),
   ]);
   return out;
 }
@@ -141,6 +174,7 @@ function defaultConfig(defaultDocs = {}) {
       defaultNpcId: "diana",
       sharedDocs: {
         world: String(defaultDocs.world || ""),
+        battleRules: String(defaultDocs.battleRules || ""),
       },
     },
     npcs: [
@@ -246,6 +280,9 @@ function applyPersonaDocDefaults(config, defaultDocs = {}) {
   out.npc.sharedDocs = isPlainObject(out.npc.sharedDocs) ? out.npc.sharedDocs : {};
   if (!String(out.npc.sharedDocs.world || "").trim()) {
     out.npc.sharedDocs.world = String(defaultDocs.world || "");
+  }
+  if (!String(out.npc.sharedDocs.battleRules || "").trim()) {
+    out.npc.sharedDocs.battleRules = String(defaultDocs.battleRules || "");
   }
 
   normalizeImageGeneration(out);
