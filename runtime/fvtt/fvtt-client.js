@@ -219,6 +219,21 @@ class FvttClient {
         };
       }
 
+      function normalizeImageSrc(value) {
+        return String(value || "").trim();
+      }
+
+      function tokenImageSrc(tokenDoc, actor) {
+        return (
+          normalizeImageSrc(tokenDoc?.texture?.src) ||
+          normalizeImageSrc(tokenDoc?.img) ||
+          normalizeImageSrc(tokenDoc?.document?.texture?.src) ||
+          normalizeImageSrc(tokenDoc?.document?.img) ||
+          normalizeImageSrc(actor?.prototypeToken?.texture?.src) ||
+          normalizeImageSrc(actor?.img)
+        );
+      }
+
       const actor = findActor();
       if (!actor) {
         return { ok: false, error: "FVTT ?≫꽣瑜?李얠? 紐삵뻽?듬땲?? FVTT_ACTOR_ID/FVTT_ACTOR_NAME???뺤씤?섏꽭??" };
@@ -245,6 +260,7 @@ class FvttClient {
         actor: {
           id: actor.id,
           name: actor.name,
+          img: normalizeImageSrc(actor?.img),
           walkSpeedFt,
           spells: summarizeSpellStatus(actor),
         },
@@ -258,6 +274,8 @@ class FvttClient {
           name: token.name,
           x: token.x,
           y: token.y,
+          img: tokenImageSrc(token, actor),
+          textureSrc: normalizeImageSrc(token?.texture?.src),
         },
       };
     }, this._actorSelector());
@@ -1383,6 +1401,26 @@ class FvttClient {
         };
       }
 
+      function combatTurnOrder(combat) {
+        if (!combat) return [];
+        if (Array.isArray(combat.turns)) return combat.turns;
+        if (Array.isArray(combat.combatants?.contents)) return combat.combatants.contents;
+        if (Array.isArray(combat.combatants)) return combat.combatants;
+        return [];
+      }
+
+      function currentCombatantOf(combat, turnOrder = []) {
+        if (!combat) return null;
+        // Prefer Foundry's active combatant pointer; some tables/plugins desync turn index from collection order.
+        if (combat.combatant) return combat.combatant;
+
+        const turn = Number(combat.turn);
+        if (Number.isInteger(turn) && turn >= 0 && turn < turnOrder.length) {
+          return turnOrder[turn] || null;
+        }
+        return null;
+      }
+
       function normalizeStatusKey(value) {
         return String(value || "")
           .toLowerCase()
@@ -1503,6 +1541,7 @@ class FvttClient {
         : Array.isArray(combat.combatants)
           ? combat.combatants
           : [];
+      const turnOrder = combatTurnOrder(combat);
 
       const actorIdText = String(actor.id || "");
       const actorTokenId = String(token?.id || "");
@@ -1514,14 +1553,7 @@ class FvttClient {
         return false;
       });
 
-      const combatTurn = Number(combat.turn);
-      let currentCombatant = null;
-      if (Number.isInteger(combatTurn) && combatTurn >= 0 && combatTurn < combatants.length) {
-        currentCombatant = combatants[combatTurn] || null;
-      }
-      if (!currentCombatant && combat.combatant) {
-        currentCombatant = combat.combatant;
-      }
+      const currentCombatant = currentCombatantOf(combat, turnOrder);
 
       const currentCombatantId = String(currentCombatant?.id || "");
       const isActorTurn = actorCombatants.some((combatant) => String(combatant?.id || "") === currentCombatantId);
@@ -1691,6 +1723,25 @@ class FvttClient {
           );
         }
 
+        function combatTurnOrder(combat) {
+          if (!combat) return [];
+          if (Array.isArray(combat.turns)) return combat.turns;
+          if (Array.isArray(combat.combatants?.contents)) return combat.combatants.contents;
+          if (Array.isArray(combat.combatants)) return combat.combatants;
+          return [];
+        }
+
+        function currentCombatantOf(combat, turnOrder = []) {
+          if (!combat) return null;
+          // Prefer Foundry's active combatant pointer; collection order can differ from initiative turn order.
+          if (combat.combatant) return combat.combatant;
+          const turn = Number(combat.turn);
+          if (Number.isInteger(turn) && turn >= 0 && turn < turnOrder.length) {
+            return turnOrder[turn] || null;
+          }
+          return null;
+        }
+
         const actor = findActor();
         if (!actor) {
           return { ok: false, error: "Actor not found for combat turn end." };
@@ -1707,13 +1758,11 @@ class FvttClient {
           : Array.isArray(combat.combatants)
             ? combat.combatants
             : [];
+        const turnOrderBefore = combatTurnOrder(combat);
 
         const roundBefore = Number.isFinite(Number(combat.round)) ? Number(combat.round) : 0;
         const turnBefore = Number.isFinite(Number(combat.turn)) ? Number(combat.turn) : -1;
-        const currentCombatant =
-          Number.isInteger(turnBefore) && turnBefore >= 0 && turnBefore < combatants.length
-            ? combatants[turnBefore] || null
-            : combat.combatant || null;
+        const currentCombatant = currentCombatantOf(combat, turnOrderBefore);
         const currentCombatantId = String(currentCombatant?.id || "");
         const turnKeyBefore = `${String(combat.id || "")}:${roundBefore}:${turnBefore}:${currentCombatantId}`;
 
@@ -1755,10 +1804,8 @@ class FvttClient {
 
         const roundAfter = Number.isFinite(Number(combat.round)) ? Number(combat.round) : roundBefore;
         const turnAfter = Number.isFinite(Number(combat.turn)) ? Number(combat.turn) : turnBefore;
-        const nextCombatant =
-          Number.isInteger(turnAfter) && turnAfter >= 0 && turnAfter < combatants.length
-            ? combatants[turnAfter] || null
-            : combat.combatant || null;
+        const turnOrderAfter = combatTurnOrder(combat);
+        const nextCombatant = currentCombatantOf(combat, turnOrderAfter);
         const nextCombatantId = String(nextCombatant?.id || "");
         const turnKeyAfter = `${String(combat.id || "")}:${roundAfter}:${turnAfter}:${nextCombatantId}`;
 
@@ -4714,11 +4761,23 @@ class FvttClient {
             .map((target) => target?.document || target)
             .filter(Boolean)
         );
-        const beforeMessageHtml = new Map(
-          (Array.isArray(game.messages?.contents) ? game.messages.contents : []).map((message) => [
-            String(message?.id || ""),
-            String(message?.content || ""),
-          ])
+        function messageSignature(message) {
+          const html = String(message?.content || "");
+          const isRoll = Boolean(message?.isRoll);
+          const rollCount = Array.isArray(message?.rolls) ? message.rolls.length : 0;
+          const flags = message?.flags || {};
+          const hasMidiWorkflow = Boolean(flags?.["midi-qol"] || flags?.midiqol);
+          const hasDnd5eCard = Boolean(flags?.dnd5e);
+          const timestamp = Number(message?.timestamp || 0);
+          return `${html}::roll=${isRoll ? 1 : 0}:${rollCount}::midi=${hasMidiWorkflow ? 1 : 0}::dnd5e=${
+            hasDnd5eCard ? 1 : 0
+          }::ts=${timestamp}`;
+        }
+
+        const beforeMessageState = new Map(
+          (Array.isArray(game.messages?.contents) ? game.messages.contents : [])
+            .map((message) => [String(message?.id || ""), messageSignature(message)])
+            .filter((entry) => Boolean(entry[0]))
         );
         const attempts = [];
         const activities = listItemActivities(item);
@@ -4762,10 +4821,10 @@ class FvttClient {
           for (const message of messages) {
             const id = String(message?.id || "");
             if (!id) continue;
-            const html = String(message?.content || "");
-            const previous = beforeMessageHtml.get(id);
-            if (previous === undefined || previous !== html) {
-              beforeMessageHtml.set(id, html);
+            const signature = messageSignature(message);
+            const previous = beforeMessageState.get(id);
+            if (previous === undefined || previous !== signature) {
+              beforeMessageState.set(id, signature);
               changed.push(summarizeMessage(message));
             }
           }
@@ -4790,6 +4849,43 @@ class FvttClient {
 
         function hasTemplateAction(messages = []) {
           return messages.some((message) => Boolean(message?.hasPlaceTemplateAction));
+        }
+
+        function collectRecentActionMessages({ sinceTsMs = 0, maxCount = 20 } = {}) {
+          const all = Array.isArray(game.messages?.contents) ? game.messages.contents : [];
+          const actorIdText = String(actor?.id || "");
+          const itemIdText = String(item?.id || "");
+          const actorUuidText = actorIdText ? `Actor.${actorIdText}` : "";
+          const itemUuidText = actorUuidText && itemIdText ? `${actorUuidText}.Item.${itemIdText}` : "";
+          const recent = [];
+
+          for (const message of [...all].reverse()) {
+            if (recent.length >= maxCount) break;
+
+            const timestamp = Number(message?.timestamp || 0);
+            if (sinceTsMs > 0 && Number.isFinite(timestamp) && timestamp + 2500 < sinceTsMs) break;
+
+            const speakerActorId = String(message?.speaker?.actor || "");
+            const flags = message?.flags || {};
+            const html = String(message?.content || "");
+            const flagItemId = String(flags?.dnd5e?.itemId || flags?.["midi-qol"]?.itemId || flags?.midiqol?.itemId || "");
+
+            const bySpeaker = Boolean(actorIdText) && speakerActorId === actorIdText;
+            const byItemIdInHtml =
+              Boolean(itemIdText) &&
+              (html.includes(`data-item-id="${itemIdText}"`) ||
+                html.includes(`data-item-id='${itemIdText}'`) ||
+                (itemUuidText && html.includes(itemUuidText)));
+            const byItemFlag = Boolean(itemIdText) && flagItemId === itemIdText;
+
+            if (!bySpeaker && !byItemIdInHtml && !byItemFlag) continue;
+
+            const summary = summarizeMessage(message);
+            if (isNoiseMessage(summary)) continue;
+            recent.push(summary);
+          }
+
+          return recent.reverse();
         }
 
         function resolveTemplateCenter() {
@@ -5398,6 +5494,7 @@ class FvttClient {
 
         const executionErrors = [];
         const requiresWorkflowResolution = Boolean(hasPromptedTemplate || targetUuids.length > 0);
+        const actionStartedAt = Date.now();
         let methodUsed = "";
         let success = false;
         let producedMessages = [];
@@ -5578,6 +5675,35 @@ class FvttClient {
             continue;
           } catch (error) {
             executionErrors.push(`${attempt.name}: ${error?.message || String(error)}`);
+          }
+        }
+
+        if (!success) {
+          const recentActionMessages = collectRecentActionMessages({
+            sinceTsMs: actionStartedAt - 1500,
+            maxCount: 24,
+          });
+          const hasRecentResolution = hasResolutionSignals(recentActionMessages);
+          const unresolvedDisplayCardOnly =
+            executionErrors.length > 0 &&
+            executionErrors.every((entry) => {
+              const text = String(entry || "").toLowerCase();
+              return (
+                text.includes("displaycard produced unresolved message only") ||
+                text.includes("unresolved card message without roll/save result") ||
+                text.includes("no chat message generated")
+              );
+            });
+
+          if (hasRecentResolution) {
+            success = true;
+            producedMessages = recentActionMessages;
+            methodUsed = "post-verify-chat-resolution";
+          } else if (recentActionMessages.length > 0 && unresolvedDisplayCardOnly) {
+            // Some Midi workflows leave a completed card but do not emit explicit roll/save follow-up messages.
+            success = true;
+            producedMessages = recentActionMessages;
+            methodUsed = "post-verify-chat-card";
           }
         }
 

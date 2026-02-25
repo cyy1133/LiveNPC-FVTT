@@ -3,6 +3,10 @@ let mdEditorTarget = null;
 let mdEditorDirty = false;
 const PERSONA_DOC_KEYS = ["identity", "soul", "behavior", "battle", "relations", "memory"];
 
+const npcCardExpandedState = new Map();
+const npcVisualByNpcId = new Map();
+let runtimeStarted = false;
+
 function $(id) {
   return document.getElementById(id);
 }
@@ -36,7 +40,8 @@ function ensureNpcShape(npc, index = 0) {
   out.enabled = out.enabled !== false;
 
   out.actor = out.actor && typeof out.actor === "object" ? out.actor : {};
-  out.actor.type = "name";
+  const actorType = String(out.actor.type || "name").toLowerCase();
+  out.actor.type = actorType === "id" || actorType === "actorid" ? "id" : "name";
   out.actor.value = String(out.actor.value || out.displayName || "");
 
   out.personaDocs = out.personaDocs && typeof out.personaDocs === "object" ? out.personaDocs : {};
@@ -98,6 +103,83 @@ function ensureConfigShape(config) {
 
 function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function fallbackAvatarText(name) {
+  const text = String(name || "").trim();
+  if (!text) return "?";
+  return text.slice(0, 1).toUpperCase();
+}
+
+function resolveNpcThumbnailUrl(raw, config) {
+  const src = String(raw || "").trim();
+  if (!src) return "";
+  if (/^(data:|blob:|https?:|file:)/i.test(src)) return src;
+
+  const base = String(config?.foundry?.url || "").trim();
+  if (!base) return src;
+  try {
+    const normalizedBase = base.endsWith("/") ? base : `${base}/`;
+    return new URL(src.replace(/^\//, ""), normalizedBase).toString();
+  } catch {
+    return src;
+  }
+}
+
+function updateNpcVisualMap(visuals) {
+  npcVisualByNpcId.clear();
+  const rows = Array.isArray(visuals) ? visuals : [];
+  for (const row of rows) {
+    const npcId = String(row?.npcId || "").trim();
+    if (!npcId) continue;
+    npcVisualByNpcId.set(npcId, row);
+  }
+}
+
+async function refreshNpcVisuals({ silent = false } = {}) {
+  if (!window.api?.getNpcVisuals) return false;
+
+  const config = ensureConfigShape(currentConfig || {});
+  try {
+    const result = await window.api.getNpcVisuals(config);
+    const visuals = Array.isArray(result?.visuals) ? result.visuals : [];
+
+    if (!result?.ok && visuals.length === 0) {
+      if (!silent) {
+        appendLog({
+          ts: Date.now(),
+          level: "warn",
+          scope: "ui",
+          message: `token visuals unavailable: ${result?.error || "runtime-not-started"}`,
+        });
+      }
+      return false;
+    }
+
+    updateNpcVisualMap(visuals);
+    renderNpcList(config);
+
+    if (!silent) {
+      const ready = visuals.filter((v) => String(v?.thumbnail || "").trim()).length;
+      appendLog({
+        ts: Date.now(),
+        level: "info",
+        scope: "ui",
+        message: `token visuals synced: ${ready}/${visuals.length}`,
+      });
+    }
+    return true;
+  } catch (e) {
+    if (!silent) {
+      appendLog({
+        ts: Date.now(),
+        level: "warn",
+        scope: "ui",
+        message: `token visuals failed: ${e?.message || e}`,
+      });
+    }
+    return false;
+  }
 }
 
 function makeUniqueNpcId(config, base = "npc") {
@@ -684,26 +766,68 @@ function renderNpcList(config) {
 
   for (let i = 0; i < npcs.length; i += 1) {
     const npc = ensureNpcShape(npcs[i], i);
-
+    const npcId = String(npc?.id || `npc_${i}`);
     const card = document.createElement("div");
     card.className = "npc-card";
 
-    const header = document.createElement("div");
-    header.className = "npc-header";
+    const headerMain = document.createElement("button");
+    headerMain.type = "button";
+    headerMain.className = "npc-header-main";
+
+    const avatar = document.createElement("div");
+    avatar.className = "npc-avatar";
 
     const meta = document.createElement("div");
     meta.className = "npc-meta";
 
     const name = document.createElement("div");
     name.className = "npc-name";
-    name.textContent = npc.displayName || npc.id || `npc_${i}`;
 
     const sub = document.createElement("div");
     sub.className = "npc-sub";
-    sub.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
 
-    meta.appendChild(name);
-    meta.appendChild(sub);
+    const expandIndicator = document.createElement("span");
+    expandIndicator.className = "npc-expand-indicator";
+    expandIndicator.textContent = "▾";
+
+    const setCardExpanded = (nextExpanded) => {
+      const expanded = Boolean(nextExpanded);
+      npcCardExpandedState.set(npcId, expanded);
+      card.classList.toggle("expanded", expanded);
+      headerMain.setAttribute("aria-expanded", expanded ? "true" : "false");
+    };
+
+    const renderCardHeader = () => {
+      const visual = npcVisualByNpcId.get(npcId) || null;
+      const displayName = String(npc.displayName || npc.id || `npc_${i}`);
+      const resolvedThumb = resolveNpcThumbnailUrl(visual?.thumbnail || "", config);
+      name.textContent = displayName;
+      sub.textContent = visual?.tokenName
+        ? `token: ${visual.tokenName}`
+        : runtimeStarted
+          ? "token: not resolved"
+          : "token: sync after Start";
+
+      avatar.innerHTML = "";
+      if (resolvedThumb) {
+        const img = document.createElement("img");
+        img.src = resolvedThumb;
+        img.alt = `${displayName} token`;
+        img.loading = "lazy";
+        avatar.appendChild(img);
+      } else {
+        const fallback = document.createElement("div");
+        fallback.className = "npc-avatar-fallback";
+        fallback.textContent = fallbackAvatarText(displayName);
+        avatar.appendChild(fallback);
+      }
+    };
+
+    const controls = document.createElement("div");
+    controls.className = "npc-controls";
+
+    const controlActions = document.createElement("div");
+    controlActions.className = "npc-control-actions";
 
     const toggle = document.createElement("label");
     toggle.className = "npc-toggle";
@@ -730,6 +854,8 @@ function renderNpcList(config) {
       );
       if (String(answer || "").trim().toLowerCase() !== "yes") return;
       closeMdEditor({ force: true });
+      npcCardExpandedState.delete(npcId);
+      npcVisualByNpcId.delete(npcId);
       config.npcs.splice(i, 1);
       setConfigEditor(config);
       renderNpcList(config);
@@ -741,16 +867,14 @@ function renderNpcList(config) {
       });
     });
 
-    const headerActions = document.createElement("div");
-    headerActions.className = "npc-header-actions";
-    headerActions.appendChild(toggle);
-    headerActions.appendChild(deleteBtn);
+    controlActions.appendChild(toggle);
+    controlActions.appendChild(deleteBtn);
+    controls.appendChild(controlActions);
 
-    header.appendChild(meta);
-    header.appendChild(headerActions);
-
-    const controls = document.createElement("div");
-    controls.className = "npc-controls";
+    const summary = document.createElement("div");
+    summary.className = "npc-summary";
+    summary.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
+    controls.appendChild(summary);
 
     const displayRow = document.createElement("div");
     displayRow.className = "npc-doc-row";
@@ -773,8 +897,8 @@ function renderNpcList(config) {
         npc.actor.value = nextDisplay;
         actorInput.value = nextDisplay;
       }
-      name.textContent = npc.displayName || npc.id || `npc_${i}`;
-      sub.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
+      summary.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
+      renderCardHeader();
       setConfigEditor(config);
     });
 
@@ -792,8 +916,9 @@ function renderNpcList(config) {
       npc.actor = npc.actor || { type: "name", value: "" };
       npc.actor.type = "name";
       npc.actor.value = String(actorInput.value || "").trim();
-      name.textContent = npc.displayName || npc.id || `npc_${i}`;
-      sub.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
+      npcVisualByNpcId.delete(npcId);
+      summary.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
+      renderCardHeader();
       setConfigEditor(config);
     });
 
@@ -817,7 +942,7 @@ function renderNpcList(config) {
       const parsed = Number(reactInput.value);
       npc.triggers.maxFt = Number.isFinite(parsed) && parsed >= 0 ? parsed : 30;
       reactInput.value = String(npc.triggers.maxFt);
-      sub.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
+      summary.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
       setConfigEditor(config);
     });
 
@@ -874,7 +999,7 @@ function renderNpcList(config) {
       npc.image = npc.image || {};
       npc.image.enabled = imageEnableCb.checked;
       imageEnableText.textContent = imageEnableCb.checked ? "Image Enabled" : "Image Disabled";
-      sub.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
+      summary.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
       setConfigEditor(config);
     });
     imageEnableRow.appendChild(imageEnableCb);
@@ -911,8 +1036,18 @@ function renderNpcList(config) {
     controls.appendChild(battleRow);
     controls.appendChild(imageDetails);
 
-    card.appendChild(header);
+    headerMain.appendChild(avatar);
+    headerMain.appendChild(meta);
+    headerMain.appendChild(expandIndicator);
+    headerMain.addEventListener("click", () => {
+      const expanded = card.classList.contains("expanded");
+      setCardExpanded(!expanded);
+    });
+
+    card.appendChild(headerMain);
     card.appendChild(controls);
+    setCardExpanded(npcCardExpandedState.get(npcId) === true);
+    renderCardHeader();
     list.appendChild(card);
   }
 }
@@ -926,6 +1061,9 @@ async function loadConfigFromMainProcess() {
   setConfigEditor(currentConfig);
   renderNpcList(currentConfig);
   await loadQuickFormFromConfig(currentConfig);
+  if (runtimeStarted) {
+    await refreshNpcVisuals({ silent: true });
+  }
   return currentConfig;
 }
 
@@ -1134,6 +1272,18 @@ async function init() {
     });
   }
 
+  const refreshNpcVisualsButton = $("btn-refresh-npc-visuals");
+  if (refreshNpcVisualsButton) {
+    refreshNpcVisualsButton.addEventListener("click", async () => {
+      refreshNpcVisualsButton.disabled = true;
+      try {
+        await refreshNpcVisuals({ silent: false });
+      } finally {
+        refreshNpcVisualsButton.disabled = false;
+      }
+    });
+  }
+
   const mdText = $("md-editor-text");
   if (mdText) {
     mdText.addEventListener("input", () => {
@@ -1291,7 +1441,9 @@ async function init() {
     $("btn-start").disabled = true;
     try {
       await window.api.startRuntime();
+      runtimeStarted = true;
       appendLog({ ts: Date.now(), level: "info", scope: "ui", message: "runtime started" });
+      await refreshNpcVisuals({ silent: false });
     } catch (e) {
       appendLog({ ts: Date.now(), level: "error", scope: "ui", message: `start failed: ${e?.message || e}` });
     } finally {
@@ -1303,6 +1455,7 @@ async function init() {
     $("btn-stop").disabled = true;
     try {
       await window.api.stopRuntime();
+      runtimeStarted = false;
       appendLog({ ts: Date.now(), level: "info", scope: "ui", message: "runtime stopped" });
     } catch (e) {
       appendLog({ ts: Date.now(), level: "error", scope: "ui", message: `stop failed: ${e?.message || e}` });

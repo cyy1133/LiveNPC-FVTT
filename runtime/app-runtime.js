@@ -1537,6 +1537,8 @@ function buildNpcPrompt({
     "- You must use actor resources below (spell slots, prepared spells, inventory, actions).",
     "- Never choose leveled spells with empty slots. Prefer cantrip/weapon if slots are depleted.",
     "- During combat turns, respect action economy: at most one Action and one Bonus Action.",
+    "- During combat turns, output an ordered action-set plan (max 4 steps) and keep only meaningful steps among say/move/action/bonus-action.",
+    "- During combat turns, each step will be executed sequentially and only Action:ok advances to the next step.",
     "- Do not target creatures with HP 0, dead/defeated state, or targets not participating in active combat.",
     "- Reflect current HP and status effects in tone and tactical decisions.",
     "- Use image intent/tag only if image generation is enabled in the context section below.",
@@ -1698,11 +1700,14 @@ function buildCombatTurnInboundText({ npcName, combatState, actorSheet, sceneCon
     "[AUTO_COMBAT_TURN]",
     `지금은 ${name}의 전투 턴입니다.`,
     "이번 턴에 합법적이고 실행 가능한 행동을 반드시 수행하세요.",
-    "replyText는 턴 시작 대사로 짧게 작성하세요 (1~2문장).",
+    "replyText는 턴 대사 후보로 짧게 작성하세요 (1~2문장).",
     "가능하면 적을 지정하고 공격/주문을 사용하세요. 사거리 밖이면 먼저 이동 후 공격하세요.",
     "한 턴에 Action은 1회, Bonus Action은 1회만 사용하세요.",
     "HP 0이거나 dead/defeated 상태의 대상은 절대 공격하지 마세요.",
     "활성 전투 중에는 전투 참가자(in-combat)만 공격 대상으로 선택하세요.",
+    "행동은 최대 4단계 액션 세트로 계획하세요: 대사(say), 이동(move), 행동(action), 보조행동(bonus-action).",
+    "intent.type은 가능하면 plan을 사용하고, steps는 실제 실행 순서대로 작성하세요.",
+    "각 단계는 이전 단계가 Action:ok일 때만 다음 단계로 진행됩니다.",
     "반드시 replyText 끝에 FVTT_ACTION 태그를 포함하세요.",
   ];
 
@@ -2078,6 +2083,82 @@ class AppRuntime {
     this._trace("runtime.stopped", { ok: true });
     await this._flushTrace();
     this.log.info("runtime", "stopped.");
+  }
+
+  async getNpcVisuals({ config } = {}) {
+    const resolvedConfig =
+      config && typeof config === "object"
+        ? config
+        : this._configRef && typeof this._configRef === "object"
+          ? this._configRef
+          : {};
+    const npcs = ensureArray(resolvedConfig?.npcs);
+
+    const makeFallback = (npc, error = "") => ({
+      npcId: String(npc?.id || ""),
+      npcName: String(npc?.displayName || npc?.id || "NPC"),
+      ok: false,
+      actorId: "",
+      actorName: "",
+      tokenId: "",
+      tokenName: "",
+      thumbnail: "",
+      thumbnailSource: "",
+      error: String(error || ""),
+    });
+
+    if (!npcs.length) {
+      return { ok: true, connected: false, visuals: [] };
+    }
+
+    if (!this.started || !this.fvtt) {
+      return {
+        ok: false,
+        connected: false,
+        error: "runtime-not-started",
+        visuals: npcs.map((npc) => makeFallback(npc, "runtime-not-started")),
+      };
+    }
+
+    const connected = await this.fvtt.ensureConnected().catch((e) => ({ ok: false, error: e?.message || String(e) }));
+    if (!connected?.ok) {
+      return {
+        ok: false,
+        connected: false,
+        error: String(connected?.error || "fvtt-connect-failed"),
+        visuals: npcs.map((npc) => makeFallback(npc, String(connected?.error || "fvtt-connect-failed"))),
+      };
+    }
+
+    const visuals = [];
+    for (const npc of npcs) {
+      const npcId = String(npc?.id || "");
+      const npcName = String(npc?.displayName || npc?.id || "NPC");
+      try {
+        const status = await this._withNpcActor(npc, () => this.fvtt.getStatus());
+        const actor = isPlainObject(status?.actor) ? status.actor : {};
+        const token = isPlainObject(status?.token) ? status.token : {};
+        const tokenImg = String(token?.img || token?.textureSrc || "").trim();
+        const actorImg = String(actor?.img || "").trim();
+
+        visuals.push({
+          npcId,
+          npcName,
+          ok: Boolean(status?.ok),
+          actorId: String(actor?.id || ""),
+          actorName: String(actor?.name || ""),
+          tokenId: String(token?.id || ""),
+          tokenName: String(token?.name || ""),
+          thumbnail: tokenImg || actorImg,
+          thumbnailSource: tokenImg ? "token" : actorImg ? "actor" : "",
+          error: status?.ok ? "" : String(status?.error || ""),
+        });
+      } catch (e) {
+        visuals.push(makeFallback(npc, e?.message || e));
+      }
+    }
+
+    return { ok: true, connected: true, visuals };
   }
 
   async _configureTrace(config) {
@@ -2543,8 +2624,22 @@ class AppRuntime {
       intent = { type: "none", args: {} };
     }
 
+    const plannedSteps = this._expandIntentToSteps(intent);
+    const budgetPreview =
+      plannedSteps.length > 0
+        ? this._applyCombatTurnStepBudget({
+            steps: plannedSteps,
+            fvttActorSheet,
+          })
+        : { steps: [] };
+    const hasPlannedSay = ensureArray(budgetPreview?.steps).some(
+      (step) => String(step?.type || "").toLowerCase() === "say"
+    );
+
     // 1) Turn start speech
-    const startSpeech = String(replyText || "").trim();
+    // If LLM already provided an explicit say-step inside the ordered action set,
+    // keep speech order inside the step queue and skip this auto pre-speech.
+    const startSpeech = hasPlannedSay ? "" : String(replyText || "").trim();
     if (startSpeech) {
       try {
         await this._withNpcActor(npc, () => this.fvtt.speakAsActor(startSpeech));
@@ -2645,6 +2740,21 @@ class AppRuntime {
 
       if (!endTurn?.ok) {
         this.log.warn("combat", `turn end failed (${npcName}): ${String(endTurn?.error || "unknown error")}`);
+      } else if (endTurn?.skipped) {
+        const reason = String(endTurn?.reason || "skipped");
+        const beforeKey = String(endTurn?.turnKeyBefore || "");
+        const afterKey = String(endTurn?.turnKeyAfter || "");
+        this.log.info(
+          "combat",
+          `turn handoff skipped (${npcName}): ${reason}${beforeKey ? ` before=${beforeKey}` : ""}${afterKey ? ` after=${afterKey}` : ""}`
+        );
+      } else {
+        const beforeKey = String(endTurn?.turnKeyBefore || "");
+        const afterKey = String(endTurn?.turnKeyAfter || "");
+        this.log.info(
+          "combat",
+          `turn handed off (${npcName})${beforeKey || afterKey ? `: ${beforeKey || "(unknown)"} -> ${afterKey || "(unknown)"}` : ""}`
+        );
       }
     } catch (e) {
       this.log.warn("combat", `turn end failed (${npcName}): ${e?.message || e}`);
@@ -3610,8 +3720,8 @@ class AppRuntime {
   _applyCombatTurnStepBudget({ steps, fvttActorSheet }) {
     const list = ensureArray(steps);
     const activationIndex = this._buildActorActionActivationIndex(fvttActorSheet);
-    const limits = { move: 1, action: 1, bonus: 1 };
-    const usage = { move: 0, action: 0, bonus: 0 };
+    const limits = { say: 1, move: 1, action: 1, bonus: 1, actionSet: 4 };
+    const usage = { say: 0, move: 0, action: 0, bonus: 0 };
     const kept = [];
     const skipped = [];
 
@@ -3619,6 +3729,21 @@ class AppRuntime {
       const step = list[i];
       const type = String(step?.type || "").toLowerCase();
       if (!type) continue;
+
+      if (kept.length >= limits.actionSet) {
+        skipped.push({ index: i + 1, type, reason: "action-set-limit-exceeded" });
+        continue;
+      }
+
+      if (type === "say") {
+        if (usage.say >= limits.say) {
+          skipped.push({ index: i + 1, type, reason: "say-budget-exceeded" });
+          continue;
+        }
+        usage.say += 1;
+        kept.push(step);
+        continue;
+      }
 
       if (type === "move" || type === "tokenmove") {
         if (usage.move >= limits.move) {
@@ -3656,7 +3781,11 @@ class AppRuntime {
         continue;
       }
 
-      kept.push(step);
+      skipped.push({
+        index: i + 1,
+        type,
+        reason: "unsupported-combat-action-set",
+      });
     }
 
     return { steps: kept, limits, usage, skipped };
@@ -3699,29 +3828,6 @@ class AppRuntime {
       steps,
     });
 
-    if (steps.length === 1) {
-      const executionHint = {
-        origin: normalizedOrigin,
-        allowAutoApproach: !runtimeState.moveConsumed,
-      };
-      const result = await this._executeNpcIntent({
-        config,
-        npc,
-        intent: steps[0],
-        strict,
-        execution: executionHint,
-      });
-      if (result?.moveConsumed) runtimeState.moveConsumed = true;
-      this._trace("fvtt.plan.done", {
-        origin: normalizedOrigin,
-        npcId: npc?.id || "",
-        strict: Boolean(strict),
-        stepsCount: 1,
-        moveConsumed: runtimeState.moveConsumed,
-      });
-      return;
-    }
-
     this.log.info("fvtt", `plan(${normalizedOrigin || "msg"}): ${steps.map((s) => s.type).join(" -> ")}`);
     for (let i = 0; i < steps.length; i += 1) {
       const step = steps[i];
@@ -3742,13 +3848,50 @@ class AppRuntime {
           allowAutoApproach: executionHint.allowAutoApproach,
         },
       });
-      const result = await this._executeNpcIntent({
-        config,
-        npc,
-        intent: step,
-        strict,
-        execution: executionHint,
+      let result = null;
+      try {
+        result = await this._executeNpcIntent({
+          config,
+          npc,
+          intent: step,
+          strict,
+          execution: executionHint,
+        });
+      } catch (e) {
+        this._trace("fvtt.plan.step.callback", {
+          origin: normalizedOrigin,
+          npcId: npc?.id || "",
+          index: i + 1,
+          total: steps.length,
+          stepType: step?.type || "",
+          callback: "Action:fail",
+          error: e,
+        });
+        if (normalizedOrigin === "combat-turn") {
+          this.log.warn("combat", `Action:fail step=${i + 1}/${steps.length} type=${step?.type || "unknown"}`);
+        }
+        throw e;
+      }
+      const callback = result?.ok === true ? "Action:ok" : "Action:fail";
+      this._trace("fvtt.plan.step.callback", {
+        origin: normalizedOrigin,
+        npcId: npc?.id || "",
+        index: i + 1,
+        total: steps.length,
+        stepType: step?.type || "",
+        callback,
+        result,
       });
+      if (normalizedOrigin === "combat-turn") {
+        const actionName = String(result?.actionName || "").trim();
+        this.log.info(
+          "combat",
+          `${callback} step=${i + 1}/${steps.length} type=${step?.type || "unknown"}${actionName ? ` action=${actionName}` : ""}`
+        );
+      }
+      if (result?.ok !== true) {
+        throw new Error(`step callback failed: step=${i + 1}/${steps.length} type=${step?.type || "unknown"}`);
+      }
       if (result?.moveConsumed) runtimeState.moveConsumed = true;
       this._trace("fvtt.plan.step.done", {
         origin: normalizedOrigin,
@@ -4249,44 +4392,56 @@ class AppRuntime {
       },
     });
 
+    if (type === "say") {
+      const text = String(args.text || "").trim();
+      if (!text) return { ok: true, moveConsumed: false, skipped: true };
+      const result = await this._withNpcActor(npc, () => this.fvtt.speakAsActor(text));
+      this._trace("fvtt.say.response", { npcId: npc?.id || "", text, result });
+      if (!result?.ok) {
+        throw new Error(String(result?.error || "say failed"));
+      }
+      this.log.info("fvtt", `say ok: ${compact(text, 120)}`);
+      return { ok: true, moveConsumed: false, saidText: text };
+    }
+
     if (type === "inspect") {
       const what = String(args.what || "").toLowerCase();
       if (what === "sheet") {
         const sheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet());
         this.log.info("fvtt", `sheet ok=${sheet?.ok}`);
         this._trace("fvtt.inspect.result", { npcId: npc?.id || "", what, result: sheet });
-        return { moveConsumed: false };
+        return { ok: true, moveConsumed: false };
       }
       if (what === "context") {
         const ctx = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(20));
         this.log.info("fvtt", `context ok=${ctx?.ok}`);
         this._trace("fvtt.inspect.result", { npcId: npc?.id || "", what, result: ctx });
-        return { moveConsumed: false };
+        return { ok: true, moveConsumed: false };
       }
       if (what === "chatlog") {
         const log = await this.fvtt.getRecentChat(10);
         this.log.info("fvtt", `chatlog ok=${log?.ok}`);
         this._trace("fvtt.inspect.result", { npcId: npc?.id || "", what, result: log });
-        return { moveConsumed: false };
+        return { ok: true, moveConsumed: false };
       }
-      return { moveConsumed: false };
+      return { ok: true, moveConsumed: false, skipped: true };
     }
 
     if (type === "image") {
       await this._executeNpcImageIntent({ config, npc, args, strict });
-      return { moveConsumed: false };
+      return { ok: true, moveConsumed: false };
     }
 
     if (type === "targetset") {
       const tokenRef = String(args.tokenRef || args.targetTokenRef || args.targetRef || "").trim();
-      if (!tokenRef) return { moveConsumed: false };
+      if (!tokenRef) return { ok: true, moveConsumed: false, skipped: true };
       const result = await this._withNpcActor(npc, () => this.fvtt.setActorTarget(tokenRef));
       this._trace("fvtt.targetset.response", { npcId: npc?.id || "", tokenRef, result });
       if (!result?.ok) {
         throw new Error(String(result?.error || "targetset failed"));
       }
       this.log.info("fvtt", `target set: ${tokenRef}`);
-      return { moveConsumed: false };
+      return { ok: true, moveConsumed: false };
     }
 
     if (type === "targetclear") {
@@ -4296,7 +4451,7 @@ class AppRuntime {
         throw new Error(String(result?.error || "targetclear failed"));
       }
       this.log.info("fvtt", "targets cleared");
-      return { moveConsumed: false };
+      return { ok: true, moveConsumed: false };
     }
 
     if (type === "move") {
@@ -4376,7 +4531,7 @@ class AppRuntime {
         "fvtt",
         `move ok: direction=${direction} amount=${move.amount}${unit}${Number.isFinite(finalX) && Number.isFinite(finalY) ? ` -> (${finalX},${finalY})` : ""}`
       );
-      return { moveConsumed: true };
+      return { ok: true, moveConsumed: true };
     }
 
     if (type === "tokenmove") {
@@ -4403,7 +4558,7 @@ class AppRuntime {
         throw new Error([result?.error || "tokenmove failed", detail].filter(Boolean).join(" | "));
       }
       this.log.info("fvtt", `tokenmove ok: ${tokenRef} ${direction}${move.amount}${move.unit}`);
-      return { moveConsumed: true };
+      return { ok: true, moveConsumed: true };
     }
 
     if (type === "action") {
@@ -4489,6 +4644,7 @@ class AppRuntime {
         `action ok: ${resolvedAction}${resolvedTarget ? ` -> ${resolvedTarget}` : ""}${finalResult?.autoResolved ? ` (${finalResult.autoResolved})` : ""}`
       );
       return {
+        ok: true,
         moveConsumed: Boolean(finalResult?.approach?.moved),
         actionActivation: this._normalizeActionActivation(finalResult?.action?.activation),
         actionName: resolvedAction,
@@ -4528,6 +4684,7 @@ class AppRuntime {
         `tokenaction ok: ${tokenRef} ${resolvedAction}${resolvedTarget ? ` -> ${resolvedTarget}` : ""}`
       );
       return {
+        ok: true,
         moveConsumed: Boolean(result?.approach?.moved),
         actionActivation: this._normalizeActionActivation(result?.action?.activation),
         actionName: resolvedAction,
@@ -4538,7 +4695,7 @@ class AppRuntime {
       const actionName = String(args.actionName || "").trim();
       if (!actionName) {
         if (strict) throw new Error("aoe failed: actionName is missing");
-        return { moveConsumed: false };
+        return { ok: true, moveConsumed: false, skipped: true };
       }
       let centerTokenRef = String(args.centerTokenRef || "").trim() || null;
       if (!strict && !centerTokenRef) {
@@ -4572,13 +4729,14 @@ class AppRuntime {
         `aoe ok: ${actionName}${centerTokenRef ? ` center=${centerTokenRef}` : ""}${result?.autoResolved ? ` (${result.autoResolved})` : ""}`
       );
       return {
+        ok: true,
         moveConsumed: false,
         actionActivation: this._normalizeActionActivation(result?.action?.activation),
         actionName,
       };
     }
 
-    return { moveConsumed: false };
+    return { ok: true, moveConsumed: false, skipped: true };
   }
 
   // Expose OAuth login for future GUI integration

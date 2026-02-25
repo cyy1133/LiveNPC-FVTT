@@ -254,6 +254,49 @@ async function readJson(filePath) {
   return JSON.parse(raw);
 }
 
+function compactTextForError(text, maxLen = 1200) {
+  const s = String(text || "")
+    .replace(/\r/g, "")
+    .trim();
+  if (!s) return "";
+  if (s.length <= maxLen) return s;
+  return `${s.slice(0, maxLen)}...(truncated)`;
+}
+
+function tryParseJsonObjectFromText(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // continue
+  }
+
+  const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i];
+    if (!line.startsWith("{") || !line.endsWith("}")) continue;
+    try {
+      return JSON.parse(line);
+    } catch {
+      // continue
+    }
+  }
+
+  const first = raw.indexOf("{");
+  const last = raw.lastIndexOf("}");
+  if (first >= 0 && last > first) {
+    try {
+      return JSON.parse(raw.slice(first, last + 1));
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
 async function getLoginStatus({ codexBin } = {}) {
   const bin = normalizeCodexBin(codexBin);
   try {
@@ -309,6 +352,7 @@ async function completeStructured({
   const outputPath = path.join(tmpDir, `codex-last-${id}.json`);
 
   try {
+    await fs.mkdir(tmpDir, { recursive: true }).catch(() => {});
     await writeJsonNoBom(schemaPath, buildStructuredSchema());
 
     const args = [
@@ -330,6 +374,7 @@ async function completeStructured({
 
     let stdout = "";
     let stderr = "";
+    let execError = null;
 
     try {
       const result = await execFileAsync(bin, args, {
@@ -342,12 +387,36 @@ async function completeStructured({
       stdout = String(result.stdout || "");
       stderr = String(result.stderr || "");
     } catch (error) {
+      execError = error;
       stdout = String(error?.stdout || "");
       stderr = String(error?.stderr || "");
       // Continue: output-last-message might still be written even on non-zero exit.
     }
 
-    const parsed = await readJson(outputPath);
+    let parsed = null;
+    try {
+      parsed = await readJson(outputPath);
+    } catch (error) {
+      const fallbackParsed = tryParseJsonObjectFromText(stdout) || tryParseJsonObjectFromText(stderr);
+      if (fallbackParsed) {
+        parsed = fallbackParsed;
+      } else {
+        const reason = [];
+        if (execError?.message) reason.push(`exec failed: ${String(execError.message)}`);
+        if (error?.message) reason.push(`output read failed: ${String(error.message)}`);
+        const stderrCompact = compactTextForError(stderr, 900);
+        if (stderrCompact) reason.push(`stderr: ${stderrCompact}`);
+        const stdoutCompact = compactTextForError(stdout, 900);
+        if (stdoutCompact) reason.push(`stdout: ${stdoutCompact}`);
+        return {
+          ok: false,
+          error: reason.length
+            ? reason.join(" | ")
+            : `codex-cli completion failed without output (${outputPath})`,
+        };
+      }
+    }
+
     const normalized = normalizeStructuredOutput(parsed);
     return {
       ok: true,
