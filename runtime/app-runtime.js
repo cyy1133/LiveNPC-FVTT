@@ -16,6 +16,12 @@ const { ensureCodexPrerequisites } = require("./setup/prereq-manager");
 
 // Foundry automation layer (Playwright + in-page scripts)
 const { FvttClient } = require("./fvtt/fvtt-client");
+const {
+  analyzeSceneTactics,
+  derivePathMoveFromSceneContext,
+  isTokenTacticallySelectable,
+  pickAutoTargetFromSceneContext,
+} = require("./tactical-grid");
 
 dotenv.config();
 
@@ -484,6 +490,11 @@ function isTokenSelectableTarget(tokenLike, sceneContext, selfTokenId = "") {
   if (Boolean(tokenLike?.hidden)) return false;
   if (isTokenDeadLike(tokenLike)) return false;
   if (isCombatActiveInSceneContext(sceneContext) && tokenLike?.inCombat !== true) return false;
+  const tactical = isPlainObject(tokenLike?.tactical) ? tokenLike.tactical : null;
+  if (tactical) {
+    if (tactical.visibleFromSelf === false) return false;
+    if (tactical.lineOfEffect === false) return false;
+  }
   return true;
 }
 
@@ -1436,8 +1447,21 @@ function formatDetailedSceneContext(sceneContext) {
       const dy = Number.isFinite(token.dyCells) ? token.dyCells : "?";
       const hpText = formatTokenHpText(token);
       const state = describeTokenState(token);
+      const tactical = isPlainObject(token?.tactical) ? token.tactical : {};
+      const los = tactical.visibleFromSelf === true ? "los=yes" : tactical.visibleFromSelf === false ? "los=no" : "los=?";
+      const path =
+        Number.isFinite(Number(tactical.pathDistanceFt)) ? `path=${Number(tactical.pathDistanceFt)}ft` : "path=?";
+      const moveCost =
+        Number.isFinite(Number(tactical.pathCostFt)) ? `cost=${Number(tactical.pathCostFt)}ft` : "cost=?";
+      const cover = String(tactical.coverLevel || "").trim() ? `cover=${String(tactical.coverLevel)}` : "cover=?";
+      const reach =
+        tactical.reachableThisTurn === true
+          ? "reach=this-turn"
+          : tactical.reachableThisTurn === false
+            ? "reach=later"
+            : "reach=?";
       lines.push(
-        `  - ${token.name} (${token.id}) pos=${token.x},${token.y} dist=${dist} orth=${orth} delta=(${dx},${dy}) hp=${hpText} state=${state}`
+        `  - ${token.name} (${token.id}) pos=${token.x},${token.y} dist=${dist} orth=${orth} delta=(${dx},${dy}) hp=${hpText} state=${state} ${los} ${cover} ${path} ${moveCost} ${reach}`
       );
     }
   }
@@ -1540,6 +1564,10 @@ function buildNpcPrompt({
     "- During combat turns, output an ordered action-set plan (max 4 steps) and keep only meaningful steps among say/move/action/bonus-action.",
     "- During combat turns, each step will be executed sequentially and only Action:ok advances to the next step.",
     "- Do not target creatures with HP 0, dead/defeated state, or targets not participating in active combat.",
+    "- Prefer targets with clear line of sight and line of effect. Treat los=no targets as blocked by walls/terrain.",
+    "- Prefer lower-cover targets when multiple hostiles are viable. Treat cover=full as not currently attackable.",
+    "- If los=no but path exists, move first to gain sight instead of attacking immediately.",
+    "- path is geometric distance; cost is actual movement cost after diagonal rules and difficult terrain.",
     "- Reflect current HP and status effects in tone and tactical decisions.",
     "- Use image intent/tag only if image generation is enabled in the context section below.",
     "",
@@ -1731,8 +1759,15 @@ function buildCombatTurnInboundText({ npcName, combatState, actorSheet, sceneCon
       const dist = Number.isFinite(Number(hostile?.distanceFt)) ? `${Number(hostile.distanceFt)}ft` : "?ft";
       const hpText = formatTokenHpText(hostile);
       const stateText = describeTokenState(hostile);
+      const tactical = isPlainObject(hostile?.tactical) ? hostile.tactical : {};
+      const los = tactical.visibleFromSelf === true ? "los=yes" : tactical.visibleFromSelf === false ? "los=no" : "los=?";
+      const path =
+        Number.isFinite(Number(tactical.pathDistanceFt)) ? `${Number(tactical.pathDistanceFt)}ft` : "?ft";
+      const cost =
+        Number.isFinite(Number(tactical.pathCostFt)) ? `${Number(tactical.pathCostFt)}ft` : "?ft";
+      const cover = String(tactical.coverLevel || "").trim() || "?";
       lines.push(
-        `  - ${String(hostile?.name || hostile?.id || "target")} (${String(hostile?.id || "?")}) dist=${dist} hp=${hpText} state=${stateText}`
+        `  - ${String(hostile?.name || hostile?.id || "target")} (${String(hostile?.id || "?")}) dist=${dist} hp=${hpText} state=${stateText} ${los} cover=${cover} path=${path} cost=${cost}`
       );
     }
   } else {
@@ -2094,6 +2129,72 @@ class AppRuntime {
           : {};
     const npcs = ensureArray(resolvedConfig?.npcs);
 
+    const normalizeHp = (hpLike) => {
+      const hp = isPlainObject(hpLike) ? hpLike : {};
+      const value = Number(hp.value);
+      const max = Number(hp.max);
+      const temp = Number(hp.temp ?? 0);
+      return {
+        value: Number.isFinite(value) ? value : null,
+        max: Number.isFinite(max) ? max : null,
+        temp: Number.isFinite(temp) ? temp : 0,
+      };
+    };
+
+    const hpState = (hp) => {
+      const value = Number(hp?.value);
+      const max = Number(hp?.max);
+      if (!Number.isFinite(value) || !Number.isFinite(max) || max <= 0) return "unknown";
+      const ratio = value / max;
+      if (ratio <= 0) return "down";
+      if (ratio <= 0.2) return "critical";
+      if (ratio <= 0.45) return "wounded";
+      if (ratio <= 0.75) return "steady";
+      return "healthy";
+    };
+
+    const hpText = (hp) => {
+      const value = Number(hp?.value);
+      const max = Number(hp?.max);
+      const temp = Number(hp?.temp ?? 0);
+      if (!Number.isFinite(value) || !Number.isFinite(max) || max <= 0) return "?/?";
+      return `${value}/${max}${Number.isFinite(temp) && temp > 0 ? `(+${temp})` : ""}`;
+    };
+
+    const normalizeConditions = (value) => {
+      const src = isPlainObject(value) ? value : {};
+      const out = {};
+      for (const [key, flag] of Object.entries(src)) {
+        out[String(key)] = Boolean(flag);
+      }
+      return out;
+    };
+
+    const collectConditionFlags = (conditions) => {
+      const order = [
+        "dead",
+        "unconscious",
+        "concentrating",
+        "bleeding",
+        "prone",
+        "stunned",
+        "restrained",
+        "grappled",
+        "incapacitated",
+        "paralyzed",
+        "blinded",
+        "deafened",
+        "frightened",
+        "charmed",
+        "poisoned",
+      ];
+      const flags = [];
+      for (const key of order) {
+        if (conditions?.[key]) flags.push(key);
+      }
+      return flags;
+    };
+
     const makeFallback = (npc, error = "") => ({
       npcId: String(npc?.id || ""),
       npcName: String(npc?.displayName || npc?.id || "NPC"),
@@ -2104,6 +2205,15 @@ class AppRuntime {
       tokenName: "",
       thumbnail: "",
       thumbnailSource: "",
+      hp: { value: null, max: null, temp: 0 },
+      hpText: "?/?",
+      hpState: "unknown",
+      conditions: {},
+      conditionFlags: [],
+      effects: [],
+      inCombat: false,
+      defeated: false,
+      isDeadLike: false,
       error: String(error || ""),
     });
 
@@ -2140,6 +2250,15 @@ class AppRuntime {
         const token = isPlainObject(status?.token) ? status.token : {};
         const tokenImg = String(token?.img || token?.textureSrc || "").trim();
         const actorImg = String(actor?.img || "").trim();
+        const hp = normalizeHp(actor?.hp || token?.hp);
+        const conditions = normalizeConditions(actor?.conditions || token?.conditions);
+        const conditionFlags = collectConditionFlags(conditions);
+        const effects = ensureArray(actor?.effects).map((v) => String(v || "").trim()).filter(Boolean).slice(0, 10);
+        const visualDeadLike =
+          Boolean(token?.isDeadLike) ||
+          Boolean(token?.defeated) ||
+          Boolean(conditions.dead) ||
+          (Number.isFinite(Number(hp.value)) && Number(hp.value) <= 0);
 
         visuals.push({
           npcId,
@@ -2151,6 +2270,15 @@ class AppRuntime {
           tokenName: String(token?.name || ""),
           thumbnail: tokenImg || actorImg,
           thumbnailSource: tokenImg ? "token" : actorImg ? "actor" : "",
+          hp,
+          hpText: hpText(hp),
+          hpState: hpState(hp),
+          conditions,
+          conditionFlags,
+          effects,
+          inCombat: token?.inCombat === true,
+          defeated: token?.defeated === true,
+          isDeadLike: visualDeadLike,
           error: status?.ok ? "" : String(status?.error || ""),
         });
       } catch (e) {
@@ -2514,7 +2642,7 @@ class AppRuntime {
     try {
       const chat = await this.fvtt.getRecentChat(10);
       if (chat?.ok) fvttChatContext = chat.messages || [];
-      fvttSceneContext = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(60));
+      fvttSceneContext = await this._getTacticalSceneContext(npc, 60);
       fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet());
     } catch (e) {
       this.log.warn("combat", `context build failed (${npcName}): ${e?.message || e}`);
@@ -2807,7 +2935,7 @@ class AppRuntime {
     try {
       const chat = await this.fvtt.getRecentChat(10);
       if (chat?.ok) fvttChatContext = chat.messages || [];
-      fvttSceneContext = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(60));
+      fvttSceneContext = await this._getTacticalSceneContext(npc, 60);
       fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet());
     } catch (e) {
       this.log.warn("combat", `end context build failed (${npcName}): ${e?.message || e}`);
@@ -2906,7 +3034,7 @@ class AppRuntime {
     try {
       const chat = await this.fvtt.getRecentChat(10);
       if (chat?.ok) fvttChatContext = chat.messages || [];
-      fvttSceneContext = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(60));
+      fvttSceneContext = await this._getTacticalSceneContext(npc, 60);
       fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet());
       const sceneTokens = await this.fvtt.listSceneTokens();
       if (sceneTokens?.ok) {
@@ -3961,7 +4089,7 @@ class AppRuntime {
 
       if (fvttReady) {
         try {
-          fvttSceneContext = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(60));
+          fvttSceneContext = await this._getTacticalSceneContext(npc, 60);
         } catch (e) {
           this.log.warn("fvtt", `scene context failed: ${e?.message || e}`);
           fvttReady = false;
@@ -4182,60 +4310,31 @@ class AppRuntime {
 
   async _pickAutoTargetTokenRef(npc) {
     try {
-      const scene = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(30));
+      const scene = await this._getTacticalSceneContext(npc, 30);
       if (!scene?.ok) return null;
 
-      const selfTokenId = String(scene?.actorToken?.id || "").trim();
-      const selected = ensureArray(scene.targets)
-        .filter((token) => isTokenSelectableTarget(token, scene, selfTokenId))
-        .map((t) => String(t?.id || "").trim())
-        .find(Boolean);
-      if (selected) return selected;
-
-      const tokens = ensureArray(scene.tokens).filter((token) => isTokenSelectableTarget(token, scene, selfTokenId));
-      if (!tokens.length) return null;
-
-      const hostiles = tokens.filter((token) => Number(token?.disposition) < 0);
-      const pool = hostiles.length ? hostiles : tokens;
-      pool.sort((a, b) => {
-        const ao = Number.isFinite(Number(a?.orthDistanceFt)) ? Number(a.orthDistanceFt) : Number.POSITIVE_INFINITY;
-        const bo = Number.isFinite(Number(b?.orthDistanceFt)) ? Number(b.orthDistanceFt) : Number.POSITIVE_INFINITY;
-        if (ao !== bo) return ao - bo;
-        const ad = Number.isFinite(Number(a?.distanceFt)) ? Number(a.distanceFt) : Number.POSITIVE_INFINITY;
-        const bd = Number.isFinite(Number(b?.distanceFt)) ? Number(b.distanceFt) : Number.POSITIVE_INFINITY;
-        if (ad !== bd) return ad - bd;
-        return String(a?.name || "").localeCompare(String(b?.name || ""), "ko");
-      });
-      return String(pool[0]?.id || "").trim() || null;
+      const selected = pickAutoTargetFromSceneContext(scene, { preferSelected: true });
+      return String(selected?.id || "").trim() || null;
     } catch {
       return null;
     }
+  }
+
+  async _getTacticalSceneContext(npc, maxTokens = 40) {
+    const scene = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(maxTokens));
+    if (!scene?.ok) return scene;
+    return analyzeSceneTactics(scene, { selfTokenId: String(scene?.actorToken?.id || "").trim() });
   }
 
   async _deriveMoveFromTarget({ npc, targetTokenRef }) {
     const ref = String(targetTokenRef || "").trim();
     if (!ref) return null;
     try {
-      const scene = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(40));
+      const scene = await this._getTacticalSceneContext(npc, 40);
       if (!scene?.ok) return null;
-      const target = findTokenByRefInSceneContext(scene, ref) || findMentionedTokenByName(scene, ref) || null;
-      if (!target) return null;
-
-      const direction = directionFromDelta(target?.dxCells, target?.dyCells);
-      if (!direction) return null;
-
-      let amount = null;
-      if (Number.isFinite(Number(target?.orthDistanceFt))) {
-        amount = Math.max(1, Math.round(Number(target.orthDistanceFt) / 5));
-      } else if (Number.isFinite(Number(target?.dxCells)) || Number.isFinite(Number(target?.dyCells))) {
-        amount = Math.max(Math.abs(Number(target?.dxCells || 0)), Math.abs(Number(target?.dyCells || 0)), 1);
-      }
-      return {
-        direction,
-        amount: Number.isFinite(Number(amount)) && Number(amount) > 0 ? Number(amount) : 1,
-        unit: "grid",
-        targetName: String(target?.name || target?.id || "").trim(),
-      };
+      const derived = derivePathMoveFromSceneContext(scene, ref);
+      if (!derived) return null;
+      return derived;
     } catch {
       return null;
     }
@@ -4268,7 +4367,7 @@ class AppRuntime {
     if (this.fvtt) {
       try {
         imageActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet());
-        imageSceneContext = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(30));
+        imageSceneContext = await this._getTacticalSceneContext(npc, 30);
         imageCombatState = await this._withNpcActor(npc, () => this.fvtt.getActorCombatState());
       } catch {
         // Ignore context fetch failures and continue with provided prompt.
@@ -4413,7 +4512,7 @@ class AppRuntime {
         return { ok: true, moveConsumed: false };
       }
       if (what === "context") {
-        const ctx = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(20));
+        const ctx = await this._getTacticalSceneContext(npc, 20);
         this.log.info("fvtt", `context ok=${ctx?.ok}`);
         this._trace("fvtt.inspect.result", { npcId: npc?.id || "", what, result: ctx });
         return { ok: true, moveConsumed: false };
@@ -4463,6 +4562,7 @@ class AppRuntime {
       let amount = Number(args.amount || 1);
       let unit = String(args.unit || "grid").toLowerCase() === "ft" ? "ft" : "grid";
       const difficult = Boolean(args.difficult);
+      let pathSegments = Array.isArray(args.pathSegments) && args.pathSegments.length ? args.pathSegments : null;
 
       if (!direction && targetTokenRef) {
         const derived = await this._deriveMoveFromTarget({ npc, targetTokenRef });
@@ -4474,9 +4574,12 @@ class AppRuntime {
           if (!args.unit && derived.unit) {
             unit = String(derived.unit) === "ft" ? "ft" : "grid";
           }
+          if (Array.isArray(derived.pathSegments) && derived.pathSegments.length) {
+            pathSegments = derived.pathSegments;
+          }
           this.log.info(
             "fvtt",
-            `move derived from target: ${derived.targetName || targetTokenRef} direction=${direction} amount=${amount}${unit}`
+            `move derived from target: ${derived.targetName || targetTokenRef} direction=${direction} amount=${amount}${unit}${Array.isArray(derived.pathSegments) && derived.pathSegments.length ? ` path=${derived.pathSegments.map((s) => `${s.direction}${s.amount}`).join(" ")}` : ""}`
           );
         }
       }
@@ -4490,10 +4593,13 @@ class AppRuntime {
             if (!Number.isFinite(amount) || amount <= 0) {
               amount = Number(derived.amount || 1);
             }
+            if (Array.isArray(derived.pathSegments) && derived.pathSegments.length) {
+              pathSegments = derived.pathSegments;
+            }
             targetTokenRef = nearestTarget;
             this.log.info(
               "fvtt",
-              `move re-derived from nearest target: ${derived.targetName || nearestTarget} direction=${direction} amount=${amount}${unit}`
+              `move re-derived from nearest target: ${derived.targetName || nearestTarget} direction=${direction} amount=${amount}${unit}${Array.isArray(derived.pathSegments) && derived.pathSegments.length ? ` path=${derived.pathSegments.map((s) => `${s.direction}${s.amount}`).join(" ")}` : ""}`
             );
           }
         }
@@ -4510,6 +4616,7 @@ class AppRuntime {
         unit,
         maxRequested: false,
         difficult,
+        pathSegments,
         raw: "llm-move",
       };
       this._trace("fvtt.move.request", {

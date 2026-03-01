@@ -10,6 +10,7 @@
     "dev": "set ELECTRON_DISABLE_SECURITY_WARNINGS=true && electron .",
     "diagnose": "node runtime/cli.js diagnose",
     "run-headless": "node runtime/cli.js run",
+    "test": "node --test",
     "pack": "electron-builder --dir",
     "dist": "electron-builder"
   },

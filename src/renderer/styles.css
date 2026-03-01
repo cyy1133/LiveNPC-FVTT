@@ -257,6 +257,25 @@ main {
   margin-top: 10px;
 }
 
+.npc-list.virtualized {
+  display: block;
+  position: relative;
+  gap: 0;
+  height: min(72vh, 960px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.npc-list.virtualized .npc-virtual-inner {
+  position: relative;
+  width: 100%;
+  min-height: 100%;
+}
+
 .npc-card {
   background: var(--panel2);
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -264,9 +283,22 @@ main {
   padding: 8px 10px;
 }
 
+.npc-list.virtualized .npc-card {
+  margin: 0;
+  height: 72px;
+  overflow: hidden;
+}
+
 .npc-card.expanded {
   border-color: rgba(242, 185, 75, 0.35);
   background: rgba(255, 255, 255, 0.1);
+}
+
+.npc-list.virtualized .npc-card.expanded {
+  height: 560px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .npc-header-main {
@@ -323,7 +355,7 @@ main {
 .npc-meta {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
   min-width: 0;
 }
 
@@ -338,6 +370,15 @@ main {
 .npc-sub {
   font-size: 11px;
   color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.npc-state {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.74);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -360,6 +401,11 @@ main {
 
 .npc-card.expanded .npc-controls {
   display: grid;
+}
+
+.npc-list.virtualized .npc-card.expanded .npc-controls {
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .npc-control-actions {

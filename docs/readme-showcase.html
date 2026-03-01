@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FVTT AI NPC Runtime Showcase</title>
+    <link rel="stylesheet" href="./readme-showcase.css" />
+  </head>
+  <body>
+    <main class="showcase">
+      <section class="hero frame" id="hero">
+        <div class="hero-copy">
+          <div class="eyebrow">Standalone Windows EXE</div>
+          <h1>FVTT AI NPC Runtime</h1>
+          <p class="lead">
+            Foundry VTT, Discord, LLM, 이미지 생성을 하나의 런타임으로 묶어
+            NPC가 대화와 전투를 직접 수행하도록 만드는 데스크톱 앱.
+          </p>
+          <div class="hero-points">
+            <div class="point">
+              <span class="point-title">전투 자동화</span>
+              <span class="point-body">행동 경제, 시야, 상태 이상, 턴 종료까지 처리</span>
+            </div>
+            <div class="point">
+              <span class="point-title">NPC 운영</span>
+              <span class="point-body">여러 NPC의 성격, 전투 패턴, 이미지 프롬프트를 분리 관리</span>
+            </div>
+            <div class="point">
+              <span class="point-title">EXE 배포</span>
+              <span class="point-body">개발 환경 없이 설치하고 설정만 입력하면 바로 실행</span>
+            </div>
+          </div>
+        </div>
+        <div class="hero-flow">
+          <div class="flow-card">
+            <span class="flow-k">Input</span>
+            <strong>Discord / FVTT</strong>
+            <small>채팅, 전투, 상태, 토큰 정보 수신</small>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-card accent">
+            <span class="flow-k">Runtime</span>
+            <strong>AI NPC Orchestrator</strong>
+            <small>문맥 구성, 규칙 적용, 행동 계획 생성</small>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-card">
+            <span class="flow-k">Output</span>
+            <strong>Talk / Move / Action / Image</strong>
+            <small>대사, 이동, 공격, 이미지 생성까지 실행</small>
+          </div>
+        </div>
+      </section>
+
+      <section class="window frame" id="dashboard">
+        <div class="window-bar">
+          <div class="dots">
+            <span></span><span></span><span></span>
+          </div>
+          <div class="window-title">FVTT AI NPC Runtime</div>
+          <div class="window-badge">Ready</div>
+        </div>
+        <div class="dashboard-grid">
+          <div class="panel">
+            <div class="panel-title">Start Panel</div>
+            <div class="button-row">
+              <button class="btn primary">Start</button>
+              <button class="btn">Stop</button>
+              <button class="btn">Diagnostics</button>
+              <button class="btn">Codex Login</button>
+            </div>
+            <div class="stats">
+              <div class="stat">
+                <span class="label">App Version</span>
+                <strong>0.1.0</strong>
+              </div>
+              <div class="stat">
+                <span class="label">Config</span>
+                <strong>%APPDATA%\fvtt-ai-runtime\config.json</strong>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">Quick Setup</div>
+            <div class="field-grid">
+              <div class="field">
+                <label>Discord Bot Token</label>
+                <div class="input">**********************</div>
+              </div>
+              <div class="field">
+                <label>Discord Channel</label>
+                <div class="input">aibot</div>
+              </div>
+              <div class="field">
+                <label>FVTT URL</label>
+                <div class="input">https://your-foundry.example</div>
+              </div>
+              <div class="field">
+                <label>FVTT Username</label>
+                <div class="input">gm-runtime</div>
+              </div>
+              <div class="field">
+                <label>LLM Provider</label>
+                <div class="input">Codex CLI (ChatGPT subscription)</div>
+              </div>
+              <div class="field">
+                <label>Model</label>
+                <div class="input">gpt-5.3-codex</div>
+              </div>
+            </div>
+            <div class="tip-row">
+              <div class="tip ok">Install Prerequisites</div>
+              <div class="tip">Run Diagnostics</div>
+              <div class="tip">Start Runtime</div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">NPC List</div>
+            <div class="npc-mini-list">
+              <div class="npc-mini expanded">
+                <div class="avatar">D</div>
+                <div class="npc-mini-copy">
+                  <strong>양치기 디아나</strong>
+                  <span>HP 17/24 · 집중 중 · 전투 참가</span>
+                </div>
+                <div class="toggle">▾</div>
+              </div>
+              <div class="npc-mini">
+                <div class="avatar alt">B</div>
+                <div class="npc-mini-copy">
+                  <strong>브램</strong>
+                  <span>HP 31/31 · 정상 · 대기</span>
+                </div>
+                <div class="toggle">▸</div>
+              </div>
+              <div class="npc-mini">
+                <div class="avatar alt2">S</div>
+                <div class="npc-mini-copy">
+                  <strong>실비아</strong>
+                  <span>HP 12/28 · 출혈 · 전투 참가</span>
+                </div>
+                <div class="toggle">▸</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel log-panel">
+            <div class="panel-title">Runtime Log</div>
+            <div class="log">
+              <div>[info] fvtt: connected.</div>
+              <div>[info] discord: logged in as Diana_PlBot</div>
+              <div>[info] combat: auto turn -&gt; 양치기 디아나</div>
+              <div>[info] llm: plan(combat-turn): move, action, speech</div>
+              <div>[info] combat: Action:ok step=1/3 type=move</div>
+              <div>[info] combat: Action:ok step=2/3 type=action</div>
+              <div>[info] combat: turn ended</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="window frame" id="npc-panel">
+        <div class="window-bar">
+          <div class="dots">
+            <span></span><span></span><span></span>
+          </div>
+          <div class="window-title">NPC Detail Workflow</div>
+          <div class="window-badge">NPC Tab</div>
+        </div>
+        <div class="npc-layout">
+          <div class="npc-column">
+            <div class="npc-card">
+              <div class="npc-head">
+                <div class="avatar large">D</div>
+                <div class="npc-head-copy">
+                  <strong>양치기 디아나</strong>
+                  <span>HP 17/24 · 집중 중 · 독 상태 · 전투 참가</span>
+                </div>
+                <div class="pill">Enabled</div>
+              </div>
+              <div class="npc-controls">
+                <div class="control">
+                  <label>Actor Match</label>
+                  <div class="input">name: 양치기 디아나</div>
+                </div>
+                <div class="control">
+                  <label>React Distance</label>
+                  <div class="input">2ft - 30ft</div>
+                </div>
+                <div class="control">
+                  <label>Battle Pattern</label>
+                  <div class="input">persona-defaults\디아나\battlePattern.md</div>
+                </div>
+                <div class="control">
+                  <label>Image Prompt</label>
+                  <div class="textarea">masterpiece, tiefling bard, silver hair, battle-ready, wounded but defiant</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="editor-column">
+            <div class="editor-panel">
+              <div class="panel-title">Markdown Editor</div>
+              <div class="editor-path">%APPDATA%\fvtt-ai-runtime\persona-defaults\디아나\battlePattern.md</div>
+              <div class="editor-body">
+                <div># Combat Principles</div>
+                <div>- 죽은 적은 타겟에서 제외한다.</div>
+                <div>- 집중 중이면 유지가 더 중요한 주문을 우선한다.</div>
+                <div>- 이동 / 행동 / 보조행동은 한 턴에 각 1회만 사용한다.</div>
+                <div>- 시야가 막히면 이동 후 재판단한다.</div>
+                <div>- HP가 낮으면 대사와 전술을 방어적으로 바꾼다.</div>
+              </div>
+            </div>
+            <div class="summary-panel">
+              <div class="panel-title">What This Improves</div>
+              <ul>
+                <li>NPC를 많이 추가해도 헤더만 보고 현재 상태를 빠르게 파악</li>
+                <li>카드 확장 상태를 유지해서 자주 보는 NPC를 바로 편집</li>
+                <li>토큰 썸네일과 요약 상태로 대상 식별 속도 향상</li>
+                <li>전투 규칙 문서를 NPC 공용 기준으로 재사용</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

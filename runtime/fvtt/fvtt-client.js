@@ -219,6 +219,112 @@ class FvttClient {
         };
       }
 
+      function combatantsOf(combat) {
+        if (!combat) return [];
+        if (Array.isArray(combat.combatants?.contents)) return combat.combatants.contents;
+        if (Array.isArray(combat.combatants)) return combat.combatants;
+        return [];
+      }
+
+      function pickCombat(scene) {
+        const all = Array.isArray(game.combats?.contents) ? game.combats.contents : [];
+        if (!all.length) return null;
+        const sceneId = String(scene?.id || canvas?.scene?.id || game.scenes.current?.id || "");
+        const open = all.filter((combat) => !combat?.ended);
+        const byScene = open.filter((combat) => String(combat?.scene?.id || combat?.sceneId || "") === sceneId);
+        return (
+          game.combat ||
+          byScene.find((combat) => Boolean(combat?.started || combat?.active)) ||
+          byScene[0] ||
+          open.find((combat) => Boolean(combat?.started || combat?.active)) ||
+          open[0] ||
+          null
+        );
+      }
+
+      function findCombatantForToken(tokenDoc, combat) {
+        if (!tokenDoc || !combat) return null;
+        const tokenId = String(tokenDoc?.id || tokenDoc?.tokenId || "");
+        const actorId = String(tokenDoc?.actorId || tokenDoc?.actor?.id || "");
+        for (const combatant of combatantsOf(combat)) {
+          const combatantTokenId = String(combatant?.tokenId || combatant?.token?.id || "");
+          const combatantActorId = String(combatant?.actorId || combatant?.actor?.id || "");
+          if (tokenId && combatantTokenId && tokenId === combatantTokenId) return combatant;
+          if (actorId && combatantActorId && actorId === combatantActorId) return combatant;
+        }
+        return null;
+      }
+
+      function normalizeStatusKey(value) {
+        return String(value || "")
+          .toLowerCase()
+          .trim()
+          .replace(/\s+/g, "")
+          .replace(/[^\p{L}\p{N}._-]+/gu, "");
+      }
+
+      function collectStatusData(tokenDoc, actor) {
+        const statusSet = new Set();
+        const labels = [];
+        const labelSet = new Set();
+
+        const pushStatus = (raw) => {
+          const key = normalizeStatusKey(raw);
+          if (!key) return;
+          statusSet.add(key);
+        };
+        const pushLabel = (raw) => {
+          const label = String(raw || "").trim();
+          if (!label) return;
+          if (!labelSet.has(label)) {
+            labelSet.add(label);
+            labels.push(label);
+          }
+          pushStatus(label);
+        };
+        const pushIterable = (iterable) => {
+          if (!iterable || typeof iterable[Symbol.iterator] !== "function") return;
+          for (const entry of iterable) pushStatus(entry);
+        };
+
+        pushIterable(actor?.statuses);
+        pushIterable(tokenDoc?.statuses);
+
+        const activeEffects = Array.isArray(actor?.effects?.contents)
+          ? actor.effects.contents
+          : Array.isArray(actor?.effects)
+            ? actor.effects
+            : [];
+        for (const effect of activeEffects) {
+          if (!effect || effect.disabled === true) continue;
+          pushLabel(effect?.name || effect?.label || "");
+          pushIterable(effect?.statuses);
+        }
+
+        const statusKeys = Array.from(statusSet);
+        const hasStatus = (re) => statusKeys.some((key) => re.test(key));
+
+        return {
+          labels: labels.slice(0, 16),
+          statusKeys: statusKeys.slice(0, 24),
+          concentrating: hasStatus(/concentr/),
+          bleeding: hasStatus(/bleed|hemorr/),
+          dead: hasStatus(/dead|defeat|dying/),
+          unconscious: hasStatus(/unconscious/),
+          prone: hasStatus(/prone/),
+          stunned: hasStatus(/stunned/),
+          restrained: hasStatus(/restrain/),
+          grappled: hasStatus(/grapple/),
+          incapacitated: hasStatus(/incapac/),
+          paralyzed: hasStatus(/paraly/),
+          blinded: hasStatus(/blind/),
+          deafened: hasStatus(/deafen/),
+          frightened: hasStatus(/frighten/),
+          charmed: hasStatus(/charm/),
+          poisoned: hasStatus(/poison/),
+        };
+      }
+
       function normalizeImageSrc(value) {
         return String(value || "").trim();
       }
@@ -254,6 +360,16 @@ class FvttClient {
       const movement = actor.system?.attributes?.movement ?? {};
       const walkSpeedFt = Number(movement.walk ?? movement.land ?? movement.fly ?? 30) || 30;
       const gridDistance = Number(scene.grid?.distance ?? 5) || 5;
+      const hpRaw = actor?.system?.attributes?.hp ?? {};
+      const hpValue = Number(hpRaw?.value);
+      const hpMax = Number(hpRaw?.max);
+      const hpTemp = Number(hpRaw?.temp ?? 0);
+      const combat = pickCombat(scene);
+      const combatant = findCombatantForToken(token, combat);
+      const defeated = Boolean(combatant?.defeated || token?.combatant?.defeated);
+      const statusData = collectStatusData(token, actor);
+      const hpZero = Number.isFinite(hpValue) && hpValue <= 0;
+      const isDeadLike = Boolean(statusData.dead || defeated || hpZero);
 
       return {
         ok: true,
@@ -261,6 +377,30 @@ class FvttClient {
           id: actor.id,
           name: actor.name,
           img: normalizeImageSrc(actor?.img),
+          hp: {
+            value: Number.isFinite(hpValue) ? hpValue : null,
+            max: Number.isFinite(hpMax) ? hpMax : null,
+            temp: Number.isFinite(hpTemp) ? hpTemp : 0,
+          },
+          conditions: {
+            concentrating: Boolean(statusData.concentrating),
+            bleeding: Boolean(statusData.bleeding),
+            dead: Boolean(statusData.dead || hpZero),
+            unconscious: Boolean(statusData.unconscious),
+            prone: Boolean(statusData.prone),
+            stunned: Boolean(statusData.stunned),
+            restrained: Boolean(statusData.restrained),
+            grappled: Boolean(statusData.grappled),
+            incapacitated: Boolean(statusData.incapacitated),
+            paralyzed: Boolean(statusData.paralyzed),
+            blinded: Boolean(statusData.blinded),
+            deafened: Boolean(statusData.deafened),
+            frightened: Boolean(statusData.frightened),
+            charmed: Boolean(statusData.charmed),
+            poisoned: Boolean(statusData.poisoned),
+          },
+          statusKeys: statusData.statusKeys,
+          effects: statusData.labels,
           walkSpeedFt,
           spells: summarizeSpellStatus(actor),
         },
@@ -276,6 +416,34 @@ class FvttClient {
           y: token.y,
           img: tokenImageSrc(token, actor),
           textureSrc: normalizeImageSrc(token?.texture?.src),
+          inCombat: Boolean(combatant),
+          combatantId: String(combatant?.id || ""),
+          defeated,
+          isDeadLike,
+          hp: {
+            value: Number.isFinite(hpValue) ? hpValue : null,
+            max: Number.isFinite(hpMax) ? hpMax : null,
+            temp: Number.isFinite(hpTemp) ? hpTemp : 0,
+          },
+          conditions: {
+            concentrating: Boolean(statusData.concentrating),
+            bleeding: Boolean(statusData.bleeding),
+            dead: Boolean(statusData.dead || hpZero),
+            unconscious: Boolean(statusData.unconscious),
+            prone: Boolean(statusData.prone),
+            stunned: Boolean(statusData.stunned),
+            restrained: Boolean(statusData.restrained),
+            grappled: Boolean(statusData.grappled),
+            incapacitated: Boolean(statusData.incapacitated),
+            paralyzed: Boolean(statusData.paralyzed),
+            blinded: Boolean(statusData.blinded),
+            deafened: Boolean(statusData.deafened),
+            frightened: Boolean(statusData.frightened),
+            charmed: Boolean(statusData.charmed),
+            poisoned: Boolean(statusData.poisoned),
+          },
+          statusKeys: statusData.statusKeys,
+          effects: statusData.labels,
         },
       };
     }, this._actorSelector());
@@ -431,6 +599,16 @@ class FvttClient {
           return table[direction] ?? null;
         }
 
+        function normalizePathSegments(raw) {
+          if (!Array.isArray(raw)) return [];
+          return raw
+            .map((segment) => ({
+              direction: String(segment?.direction || "").toUpperCase().trim(),
+              amount: Math.max(0, Math.round(Number(segment?.amount || 0))),
+            }))
+            .filter((segment) => ["N", "S", "E", "W", "NE", "NW", "SE", "SW"].includes(segment.direction) && segment.amount > 0);
+        }
+
         const actor = findActor();
         if (!actor) return { ok: false, error: "?≫꽣瑜?李얠? 紐삵뻽?듬땲??" };
 
@@ -442,7 +620,8 @@ class FvttClient {
           };
         }
 
-        const vector = directionVector(move.direction);
+        const pathSegments = normalizePathSegments(move.pathSegments);
+        const vector = directionVector(move.direction) || (pathSegments.length ? [0, 0] : null);
         if (!vector) return { ok: false, error: "?대룞 諛⑺뼢 ?댁꽍???ㅽ뙣?덉뒿?덈떎." };
 
         if (!canvas.scene || canvas.scene.id !== scene.id) {
@@ -489,6 +668,79 @@ class FvttClient {
         const [vx, vy] = vector;
         const startX = Number(placeable.document.x);
         const startY = Number(placeable.document.y);
+
+        if (pathSegments.length > 0) {
+          let remainingSteps = maxByBudgetSteps;
+          let currentX = startX;
+          let currentY = startY;
+          let executedSteps = 0;
+          const executedSegments = [];
+          const requestedPathSteps = pathSegments.reduce((sum, segment) => sum + Number(segment.amount || 0), 0);
+          const points = [placeable.center];
+
+          for (const segment of pathSegments) {
+            if (remainingSteps <= 0) break;
+            const segVector = directionVector(segment.direction);
+            if (!segVector) continue;
+            const segSteps = Math.min(remainingSteps, Math.max(0, Number(segment.amount || 0)));
+            if (segSteps <= 0) continue;
+
+            currentX += segVector[0] * gridSizePx * segSteps;
+            currentY += segVector[1] * gridSizePx * segSteps;
+            executedSteps += segSteps;
+            remainingSteps -= segSteps;
+            points.push({
+              x: currentX + tokenWidthPx / 2,
+              y: currentY + tokenHeightPx / 2,
+            });
+            executedSegments.push({
+              direction: segment.direction,
+              amount: segSteps,
+              unit: "grid",
+            });
+
+            await placeable.document.update({ x: currentX, y: currentY }, { animate: true });
+            await new Promise((resolve) => setTimeout(resolve, 120));
+          }
+
+          if (executedSteps <= 0) {
+            return {
+              ok: false,
+              error: "??苡?????猷?揶쎛??椰꾧퀡????됰퓠????猷??????곷뮸??덈뼄.",
+              details: {
+                walkSpeedFt,
+                difficultApplied: move.difficult,
+              },
+            };
+          }
+
+          const measured = canvas.grid.measurePath(points);
+          const measuredDistanceFt = Number(
+            measured?.distance ?? measured?.cost ?? executedSteps * sceneGridDistance
+          );
+          const costFt = measuredDistanceFt * costMultiplier;
+          return {
+            ok: true,
+            actorName: actor.name,
+            sceneName: scene.name,
+            stepsMoved: executedSteps,
+            distanceFt: Number(measuredDistanceFt.toFixed(2)),
+            costFt: Number(costFt.toFixed(2)),
+            walkSpeedFt,
+            remainingFt: Number(Math.max(0, walkSpeedFt - costFt).toFixed(2)),
+            clipped: executedSteps < requestedPathSteps,
+            difficultApplied: move.difficult,
+            difficultMultiplier: costMultiplier,
+            pathSegments: executedSegments,
+            token: {
+              id: token.id,
+              x: currentX,
+              y: currentY,
+            },
+            note: move.difficult ? `difficult terrain: cost x${costMultiplier}` : "",
+          };
+        }
+
         const isDiagonal = vx !== 0 && vy !== 0;
 
         if (isDiagonal) {
@@ -1003,6 +1255,213 @@ class FvttClient {
           return (px / gridSizePx) * gridDistance;
         }
 
+        function normalizeDiagonalRuleValue(value) {
+          if (typeof value === "number") {
+            const table = new Map([
+              [0, "alternating-1"],
+              [1, "equidistant"],
+              [2, "exact"],
+              [3, "approximate"],
+              [4, "rectilinear"],
+              [5, "alternating-2"],
+            ]);
+            return table.get(value) || "alternating-1";
+          }
+          const raw = String(value || "")
+            .trim()
+            .toLowerCase()
+            .replace(/[_\s]+/g, "-");
+          if (!raw) return "alternating-1";
+          if (raw.includes("equidistant") || raw === "equal") return "equidistant";
+          if (raw.includes("exact")) return "exact";
+          if (raw.includes("approx")) return "approximate";
+          if (raw.includes("rect") || raw.includes("manhattan")) return "rectilinear";
+          if (raw.includes("alternating-2") || raw.includes("10-5")) return "alternating-2";
+          return "alternating-1";
+        }
+
+        function extractNumericCandidates(value, out = []) {
+          if (typeof value === "number" && Number.isFinite(value)) {
+            out.push(value);
+            return out;
+          }
+          if (Array.isArray(value)) {
+            for (const entry of value) extractNumericCandidates(entry, out);
+            return out;
+          }
+          if (value && typeof value === "object") {
+            for (const entry of Object.values(value)) extractNumericCandidates(entry, out);
+          }
+          return out;
+        }
+
+        function deriveMovementCostMultiplier(behavior) {
+          if (!behavior || typeof behavior !== "object") return 1;
+          const typeText = [
+            behavior.type,
+            behavior.name,
+            behavior.label,
+            behavior.system?.type,
+            behavior.constructor?.name,
+          ]
+            .map((value) => String(value || "").toLowerCase())
+            .join(" ");
+          const looksLikeMovementCost =
+            typeText.includes("movement") ||
+            typeText.includes("terrain") ||
+            typeText.includes("difficult") ||
+            typeText.includes("cost");
+          const numericCandidates = extractNumericCandidates([
+            behavior.multiplier,
+            behavior.costMultiplier,
+            behavior.value,
+            behavior.factor,
+            behavior.cost,
+            behavior.difficulties,
+            behavior.system?.multiplier,
+            behavior.system?.costMultiplier,
+            behavior.system?.value,
+            behavior.system?.factor,
+            behavior.system?.cost,
+            behavior.system?.difficulties,
+          ]);
+          const finite = numericCandidates
+            .map((value) => Number(value))
+            .filter((value) => Number.isFinite(value) && value > 1 && value <= 10);
+          if (finite.length > 0) return Math.max(...finite);
+          return looksLikeMovementCost ? 2 : 1;
+        }
+
+        function collectMovementCostRegions(sceneRef) {
+          const placeables = Array.isArray(canvas?.regions?.placeables) ? canvas.regions.placeables : [];
+          const docs = Array.isArray(sceneRef?.regions?.contents)
+            ? sceneRef.regions.contents
+            : Array.isArray(sceneRef?.regions)
+              ? sceneRef.regions
+              : [];
+          const out = [];
+
+          for (const regionDoc of docs) {
+            const regionId = String(regionDoc?.id || "");
+            const placeable = placeables.find((entry) => String(entry?.document?.id || entry?.id || "") === regionId) || null;
+            const behaviorDocs = Array.isArray(regionDoc?.behaviors?.contents)
+              ? regionDoc.behaviors.contents
+              : Array.isArray(regionDoc?.behaviors)
+                ? regionDoc.behaviors
+                : [];
+            let multiplier = 1;
+            for (const behavior of behaviorDocs) {
+              multiplier = Math.max(multiplier, deriveMovementCostMultiplier(behavior));
+            }
+            if (!(multiplier > 1) || !placeable?.testPoint) continue;
+            out.push({
+              id: regionId,
+              multiplier,
+              testPoint: (point) => {
+                try {
+                  return placeable.testPoint(point) === true;
+                } catch {
+                  return false;
+                }
+              },
+            });
+          }
+
+          return out;
+        }
+
+        function collectTerrainCells(cols, rows, regionList) {
+          const cells = {};
+          if (!Array.isArray(regionList) || regionList.length === 0) return cells;
+          for (let y = 0; y < rows; y += 1) {
+            for (let x = 0; x < cols; x += 1) {
+              const point = {
+                x: (x + 0.5) * gridSizePx,
+                y: (y + 0.5) * gridSizePx,
+              };
+              let multiplier = 1;
+              for (const region of regionList) {
+                if (region.testPoint(point)) multiplier = Math.max(multiplier, Number(region.multiplier || 1));
+              }
+              if (multiplier > 1) cells[`${x},${y}`] = multiplier;
+            }
+          }
+          return cells;
+        }
+
+        function coerceCollisionBlocked(result) {
+          if (typeof result === "boolean") return result;
+          if (Array.isArray(result)) return result.length > 0;
+          if (result && typeof result === "object") {
+            if (Array.isArray(result.collisions)) return result.collisions.length > 0;
+            if (typeof result.blocked === "boolean") return result.blocked;
+            if (typeof result.result === "boolean") return result.result;
+          }
+          return false;
+        }
+
+        function testNativeCollision(kind, origin, destination) {
+          const options = { type: kind, mode: "any" };
+          try {
+            const backend = CONFIG?.Canvas?.polygonBackends?.[kind];
+            if (backend && typeof backend.testCollision === "function") {
+              return {
+                blocked: coerceCollisionBlocked(backend.testCollision(origin, destination, options)),
+                api: `polygonBackends.${kind}`,
+              };
+            }
+          } catch {
+            // continue
+          }
+
+          try {
+            if (canvas?.walls?.checkCollision) {
+              return {
+                blocked: coerceCollisionBlocked(canvas.walls.checkCollision(origin, destination, options)),
+                api: "canvas.walls.checkCollision(points)",
+              };
+            }
+          } catch {
+            // continue
+          }
+
+          try {
+            const RayCtor = globalThis.Ray || foundry?.canvas?.geometry?.Ray;
+            if (canvas?.walls?.checkCollision && RayCtor) {
+              return {
+                blocked: coerceCollisionBlocked(canvas.walls.checkCollision(new RayCtor(origin, destination), options)),
+                api: "canvas.walls.checkCollision(ray)",
+              };
+            }
+          } catch {
+            // continue
+          }
+
+          return { blocked: false, api: "fallback:none" };
+        }
+
+        function buildSamplePoints(tokenDoc) {
+          const left = Number(tokenDoc?.x || 0);
+          const top = Number(tokenDoc?.y || 0);
+          const widthPx = Number(tokenDoc?.width || 1) * gridSizePx;
+          const heightPx = Number(tokenDoc?.height || 1) * gridSizePx;
+          return [
+            { x: left + widthPx / 2, y: top + heightPx / 2 },
+            { x: left + widthPx * 0.2, y: top + heightPx * 0.2 },
+            { x: left + widthPx * 0.8, y: top + heightPx * 0.2 },
+            { x: left + widthPx * 0.2, y: top + heightPx * 0.8 },
+            { x: left + widthPx * 0.8, y: top + heightPx * 0.8 },
+          ];
+        }
+
+        function classifyCover(totalRays, blockedRays, lineOfEffect) {
+          const ratio = totalRays > 0 ? blockedRays / totalRays : 1;
+          if (!lineOfEffect || ratio >= 1) return { coverLevel: "full", coverValue: 99, coverRatio: 1 };
+          if (ratio >= 0.6) return { coverLevel: "three-quarters", coverValue: 5, coverRatio: Number(ratio.toFixed(2)) };
+          if (ratio >= 0.2) return { coverLevel: "half", coverValue: 2, coverRatio: Number(ratio.toFixed(2)) };
+          return { coverLevel: "none", coverValue: 0, coverRatio: Number(ratio.toFixed(2)) };
+        }
+
         function deltaCellsBetweenCenters(fromCenter, toCenter) {
           return {
             dxCells: Math.round((Number(toCenter?.x || 0) - Number(fromCenter?.x || 0)) / gridSizePx),
@@ -1025,6 +1484,52 @@ class FvttClient {
                 (Number(actorToken.height || 1) * gridSizePx) / 2,
             }
           : null;
+        const actorSamples = actorToken ? buildSamplePoints(actorToken) : [];
+        const sceneCols = Math.max(1, Math.ceil(Number(scene.width || 0) / gridSizePx) || 1);
+        const sceneRows = Math.max(1, Math.ceil(Number(scene.height || 0) / gridSizePx) || 1);
+        const movementCostRegions = collectMovementCostRegions(scene);
+        const terrainCells = collectTerrainCells(sceneCols, sceneRows, movementCostRegions);
+
+        function buildNativeTactical(tokenDoc) {
+          if (!actorToken || !actorCenter || !tokenDoc || String(tokenDoc?.id || "") === String(actorToken?.id || "")) return null;
+          const targetSamples = buildSamplePoints(tokenDoc);
+          let totalRays = 0;
+          let blockedRays = 0;
+          let clearRays = 0;
+          let blockedByWall = false;
+          let collisionApi = "";
+
+          for (let fromIndex = 0; fromIndex < actorSamples.length; fromIndex += 1) {
+            for (let toIndex = 0; toIndex < targetSamples.length; toIndex += 1) {
+              totalRays += 1;
+              const sight = testNativeCollision("sight", actorSamples[fromIndex], targetSamples[toIndex]);
+              collisionApi = collisionApi || sight.api;
+              if (sight.blocked) {
+                blockedRays += 1;
+                if (fromIndex === 0 && toIndex === 0) blockedByWall = true;
+              } else {
+                clearRays += 1;
+              }
+            }
+          }
+
+          const lineOfEffect = clearRays > 0;
+          const hidden = Boolean(tokenDoc?.hidden);
+          const cover = classifyCover(totalRays, blockedRays, lineOfEffect);
+          return {
+            native: true,
+            collisionApi: collisionApi || "fallback:none",
+            blockedByWall,
+            lineOfEffect,
+            visibleFromSelf: !hidden && lineOfEffect,
+            ...cover,
+            coverSamples: {
+              totalRays,
+              blockedRays,
+              clearRays,
+            },
+          };
+        }
 
         const tokens = sceneTokenDocs.map((token) => {
           const tokenState = summarizeTokenState(token, combat);
@@ -1032,6 +1537,7 @@ class FvttClient {
             x: Number(token.x || 0) + (Number(token.width || 1) * gridSizePx) / 2,
             y: Number(token.y || 0) + (Number(token.height || 1) * gridSizePx) / 2,
           };
+          const tactical = buildNativeTactical(token);
 
           let distanceFt = null;
           let orthDistanceFt = null;
@@ -1069,6 +1575,7 @@ class FvttClient {
             orthDistanceFt,
             dxCells,
             dyCells,
+            tactical,
           };
         });
 
@@ -1102,6 +1609,26 @@ class FvttClient {
           scene.background?.texture?.src ||
           scene.img ||
           "";
+        const walls = (Array.isArray(scene.walls?.contents) ? scene.walls.contents : Array.isArray(scene.walls) ? scene.walls : [])
+          .map((wall) => {
+            const coords = Array.isArray(wall?.c)
+              ? wall.c
+              : Array.isArray(wall?.document?.c)
+                ? wall.document.c
+                : [];
+            if (!Array.isArray(coords) || coords.length < 4) return null;
+            return {
+              id: String(wall?.id || wall?.document?.id || ""),
+              c: coords.slice(0, 4).map((value) => Number(value || 0)),
+              move: wall?.move ?? wall?.document?.move ?? 0,
+              sight: wall?.sight ?? wall?.document?.sight ?? 0,
+              open:
+                wall?.isOpen === true ||
+                wall?.document?.isOpen === true ||
+                String(wall?.doorState || wall?.document?.doorState || "").toLowerCase() === "open",
+            };
+          })
+          .filter(Boolean);
 
         const description = toPlainText(scene.description || scene.navName || "");
         const inventory = actor ? summarizeInventory(actor) : null;
@@ -1147,6 +1674,7 @@ class FvttClient {
               distanceFt = Number(measureGridDistanceFt(actorCenter, center).toFixed(1));
               orthDistanceFt = Number(((Math.abs(dxCells) + Math.abs(dyCells)) * gridDistance).toFixed(1));
             }
+            const tactical = targetScene && targetScene.id === scene.id ? buildNativeTactical(document) : null;
 
             return {
               id: String(document?.id || ""),
@@ -1168,6 +1696,7 @@ class FvttClient {
               orthDistanceFt,
               dxCells,
               dyCells,
+              tactical,
             };
           })
           .filter((target) => Boolean(target.id));
@@ -1180,8 +1709,12 @@ class FvttClient {
             width: Number(scene.width || 0),
             height: Number(scene.height || 0),
             gridDistance,
+            gridSizePx,
             gridUnits,
             gridType: Number(scene.grid?.type ?? 0),
+            diagonalRule: normalizeDiagonalRuleValue(scene.grid?.diagonals ?? canvas?.grid?.diagonals),
+            cols: sceneCols,
+            rows: sceneRows,
             backgroundSrc,
             description: description.slice(0, 600),
             combat: combat
@@ -1216,6 +1749,8 @@ class FvttClient {
                 name: actorToken.name || actorToken.id,
                 x: Number(actorToken.x || 0),
                 y: Number(actorToken.y || 0),
+                width: Number(actorToken.width || 1),
+                height: Number(actorToken.height || 1),
               }
             : null,
           actorTokenInOtherScene:
@@ -1231,6 +1766,8 @@ class FvttClient {
             total: tokens.length,
             hidden: tokens.filter((token) => token.hidden).length,
           },
+          terrainCells,
+          walls,
           targets,
           tokens: tokens.slice(0, maxTokens),
         };

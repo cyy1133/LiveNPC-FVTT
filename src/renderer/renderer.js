@@ -5,10 +5,88 @@ const PERSONA_DOC_KEYS = ["identity", "soul", "behavior", "battle", "relations",
 
 const npcCardExpandedState = new Map();
 const npcVisualByNpcId = new Map();
+const npcThumbnailFailureByNpcId = new Map();
+
+const NPC_CARD_STATE_STORAGE_KEY = "livenpc:npc-card-expanded:v1";
+const NPC_VIRTUALIZATION_THRESHOLD = 24;
+const NPC_VIRTUAL_OVERSCAN_PX = 420;
+const NPC_VIRTUAL_COLLAPSED_HEIGHT_PX = 72;
+const NPC_VIRTUAL_EXPANDED_HEIGHT_PX = 560;
+const NPC_VIRTUAL_CARD_GAP_PX = 10;
+
+let npcCardStateLoaded = false;
+let npcAvatarLazyObserver = null;
+let npcAvatarLazyObserverRoot = null;
 let runtimeStarted = false;
 
 function $(id) {
   return document.getElementById(id);
+}
+
+function loadNpcCardExpandedStateFromStorage() {
+  if (npcCardStateLoaded) return;
+  npcCardStateLoaded = true;
+  try {
+    const raw = window.localStorage?.getItem(NPC_CARD_STATE_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return;
+    for (const [npcId, expanded] of Object.entries(parsed)) {
+      const id = String(npcId || "").trim();
+      if (!id) continue;
+      npcCardExpandedState.set(id, Boolean(expanded));
+    }
+  } catch {
+    // ignore storage parse failures
+  }
+}
+
+function persistNpcCardExpandedStateToStorage() {
+  try {
+    const out = {};
+    for (const [npcId, expanded] of npcCardExpandedState.entries()) {
+      const id = String(npcId || "").trim();
+      if (!id) continue;
+      out[id] = expanded === true;
+    }
+    window.localStorage?.setItem(NPC_CARD_STATE_STORAGE_KEY, JSON.stringify(out));
+  } catch {
+    // ignore storage write failures
+  }
+}
+
+function pruneNpcUiState(config) {
+  const ids = new Set(
+    (Array.isArray(config?.npcs) ? config.npcs : [])
+      .map((npc) => String(npc?.id || "").trim())
+      .filter(Boolean)
+  );
+
+  let changed = false;
+  for (const key of npcCardExpandedState.keys()) {
+    if (!ids.has(key)) {
+      npcCardExpandedState.delete(key);
+      changed = true;
+    }
+  }
+  for (const key of npcVisualByNpcId.keys()) {
+    if (!ids.has(key)) npcVisualByNpcId.delete(key);
+  }
+  for (const key of npcThumbnailFailureByNpcId.keys()) {
+    if (!ids.has(key)) npcThumbnailFailureByNpcId.delete(key);
+  }
+
+  if (changed) persistNpcCardExpandedStateToStorage();
+}
+
+function shouldUseNpcVirtualization(npcs) {
+  return Array.isArray(npcs) && npcs.length >= NPC_VIRTUALIZATION_THRESHOLD;
+}
+
+function estimateNpcCardHeight(npc) {
+  const npcId = String(npc?.id || "").trim();
+  if (!npcId) return NPC_VIRTUAL_COLLAPSED_HEIGHT_PX;
+  return npcCardExpandedState.get(npcId) === true ? NPC_VIRTUAL_EXPANDED_HEIGHT_PX : NPC_VIRTUAL_COLLAPSED_HEIGHT_PX;
 }
 
 function nowLineTs() {
@@ -127,11 +205,24 @@ function resolveNpcThumbnailUrl(raw, config) {
 }
 
 function updateNpcVisualMap(visuals) {
-  npcVisualByNpcId.clear();
   const rows = Array.isArray(visuals) ? visuals : [];
+  const nextMap = new Map();
   for (const row of rows) {
     const npcId = String(row?.npcId || "").trim();
     if (!npcId) continue;
+    nextMap.set(npcId, row);
+  }
+
+  for (const [npcId, row] of nextMap.entries()) {
+    const nextThumb = String(row?.thumbnail || "").trim();
+    const failedThumb = String(npcThumbnailFailureByNpcId.get(npcId) || "").trim();
+    if (nextThumb && failedThumb && nextThumb !== failedThumb) {
+      npcThumbnailFailureByNpcId.delete(npcId);
+    }
+  }
+
+  npcVisualByNpcId.clear();
+  for (const [npcId, row] of nextMap.entries()) {
     npcVisualByNpcId.set(npcId, row);
   }
 }
@@ -428,6 +519,12 @@ function setMainTab(tabId) {
     const active = String(panel.dataset.mainTabContent || "") === wanted;
     panel.classList.toggle("active", active);
   });
+
+  if (wanted === "npc" && currentConfig) {
+    window.requestAnimationFrame(() => {
+      renderNpcList(currentConfig);
+    });
+  }
 }
 
 function setBasicTab(tabId) {
@@ -703,6 +800,157 @@ async function editTargetWithFallbackPick(target) {
   }
   return openMdEditorForTarget(target);
 }
+
+function npcConditionLabel(flagKey) {
+  const key = String(flagKey || "").trim().toLowerCase();
+  if (!key) return "";
+  const table = {
+    dead: "사망",
+    unconscious: "기절",
+    concentrating: "집중",
+    bleeding: "출혈",
+    prone: "넘어짐",
+    stunned: "충격",
+    restrained: "속박",
+    grappled: "붙잡힘",
+    incapacitated: "행동불가",
+    paralyzed: "마비",
+    blinded: "실명",
+    deafened: "난청",
+    frightened: "공포",
+    charmed: "매혹",
+    poisoned: "중독",
+  };
+  return table[key] || key;
+}
+
+function collectNpcConditionLabels(visual) {
+  const labels = [];
+  const seen = new Set();
+
+  const addLabel = (raw) => {
+    const label = String(raw || "").trim();
+    if (!label || seen.has(label)) return;
+    seen.add(label);
+    labels.push(label);
+  };
+
+  const flags = Array.isArray(visual?.conditionFlags) ? visual.conditionFlags : [];
+  for (const flag of flags) {
+    addLabel(npcConditionLabel(flag));
+  }
+
+  const conditions = visual?.conditions && typeof visual.conditions === "object" ? visual.conditions : {};
+  for (const [key, value] of Object.entries(conditions)) {
+    if (!value) continue;
+    addLabel(npcConditionLabel(key));
+  }
+
+  return labels.slice(0, 4);
+}
+
+function formatNpcHpHeaderText(visual) {
+  const hp = visual?.hp && typeof visual.hp === "object" ? visual.hp : {};
+  const value = Number(hp.value);
+  const max = Number(hp.max);
+  const temp = Number(hp.temp ?? 0);
+  if (!Number.isFinite(value) || !Number.isFinite(max) || max <= 0) return "HP ?/?";
+  const percent = Math.round((value / max) * 100);
+  return `HP ${value}/${max}${Number.isFinite(temp) && temp > 0 ? `(+${temp})` : ""} ${percent}%`;
+}
+
+function formatNpcHeaderStateSummary(visual) {
+  if (!visual || !visual.ok) {
+    return runtimeStarted ? "상태: 토큰/배우 미해결" : "상태: Start 후 동기화";
+  }
+
+  const parts = [formatNpcHpHeaderText(visual)];
+  const conditionLabels = collectNpcConditionLabels(visual);
+  parts.push(conditionLabels.length ? conditionLabels.join(", ") : "정상");
+
+  if (visual?.isDeadLike) parts.push("전투불가");
+  else if (visual?.inCombat) parts.push("전투참가");
+  else parts.push("비전투");
+
+  return parts.join(" | ");
+}
+
+function setNpcAvatarFallback(avatar, displayName) {
+  avatar.innerHTML = "";
+  const fallback = document.createElement("div");
+  fallback.className = "npc-avatar-fallback";
+  fallback.textContent = fallbackAvatarText(displayName);
+  avatar.appendChild(fallback);
+}
+
+function ensureNpcAvatarLazyObserver() {
+  if (typeof window.IntersectionObserver !== "function") return null;
+  const list = $("npc-list");
+  if (!list) return null;
+
+  if (npcAvatarLazyObserver && npcAvatarLazyObserverRoot === list) return npcAvatarLazyObserver;
+
+  if (npcAvatarLazyObserver) {
+    try {
+      npcAvatarLazyObserver.disconnect();
+    } catch {
+      // ignore
+    }
+  }
+
+  npcAvatarLazyObserverRoot = list;
+  npcAvatarLazyObserver = new window.IntersectionObserver(
+    (entries, observer) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const img = entry.target;
+        const src = String(img?.dataset?.src || "").trim();
+        if (src && !img.getAttribute("src")) {
+          img.setAttribute("src", src);
+        }
+        observer.unobserve(img);
+      }
+    },
+    { root: list, rootMargin: "220px 0px" }
+  );
+
+  return npcAvatarLazyObserver;
+}
+
+function appendNpcAvatarImage({ avatar, npcId, displayName, thumbnailUrl }) {
+  const src = String(thumbnailUrl || "").trim();
+  const failed = String(npcThumbnailFailureByNpcId.get(npcId) || "").trim();
+  if (!src || (failed && failed === src)) {
+    setNpcAvatarFallback(avatar, displayName);
+    return;
+  }
+
+  avatar.innerHTML = "";
+  const img = document.createElement("img");
+  img.alt = `${displayName} token`;
+  img.loading = "lazy";
+  img.decoding = "async";
+  img.dataset.src = src;
+  img.addEventListener("error", () => {
+    const failedSrc = String(img.dataset.src || img.currentSrc || img.src || "").trim();
+    if (failedSrc) npcThumbnailFailureByNpcId.set(npcId, failedSrc);
+    setNpcAvatarFallback(avatar, displayName);
+  });
+  img.addEventListener("load", () => {
+    const failedSrc = String(npcThumbnailFailureByNpcId.get(npcId) || "").trim();
+    if (failedSrc === src) npcThumbnailFailureByNpcId.delete(npcId);
+  });
+
+  avatar.appendChild(img);
+
+  const observer = ensureNpcAvatarLazyObserver();
+  if (observer) {
+    observer.observe(img);
+  } else {
+    img.src = src;
+  }
+}
+
 function createDocPathRow({ label, value, placeholder, onChange, onPick, onEdit }) {
   const wrap = document.createElement("div");
   wrap.className = "npc-doc-row";
@@ -750,13 +998,390 @@ function createDocPathRow({ label, value, placeholder, onChange, onPick, onEdit 
   return wrap;
 }
 
-function renderNpcList(config) {
-  const list = $("npc-list");
+function createNpcCardElement(config, npc, i, { virtualized = false } = {}) {
+  const npcId = String(npc?.id || `npc_${i}`);
+  const card = document.createElement("div");
+  card.className = "npc-card";
+
+  const headerMain = document.createElement("button");
+  headerMain.type = "button";
+  headerMain.className = "npc-header-main";
+
+  const avatar = document.createElement("div");
+  avatar.className = "npc-avatar";
+
+  const meta = document.createElement("div");
+  meta.className = "npc-meta";
+
+  const name = document.createElement("div");
+  name.className = "npc-name";
+
+  const sub = document.createElement("div");
+  sub.className = "npc-sub";
+
+  const state = document.createElement("div");
+  state.className = "npc-state";
+
+  const expandIndicator = document.createElement("span");
+  expandIndicator.className = "npc-expand-indicator";
+  expandIndicator.textContent = "▾";
+
+  const controls = document.createElement("div");
+  controls.className = "npc-controls";
+
+  const summary = document.createElement("div");
+  summary.className = "npc-summary";
+
+  const updateSummary = () => {
+    summary.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
+  };
+
+  const setCardExpanded = (nextExpanded, { reflow = true } = {}) => {
+    const expanded = Boolean(nextExpanded);
+    npcCardExpandedState.set(npcId, expanded);
+    persistNpcCardExpandedStateToStorage();
+    card.classList.toggle("expanded", expanded);
+    headerMain.setAttribute("aria-expanded", expanded ? "true" : "false");
+    if (virtualized && reflow) {
+      renderNpcList(config);
+    }
+  };
+
+  const renderCardHeader = () => {
+    const visual = npcVisualByNpcId.get(npcId) || null;
+    const displayName = String(npc.displayName || npc.id || `npc_${i}`);
+    const resolvedThumb = resolveNpcThumbnailUrl(visual?.thumbnail || "", config);
+
+    name.textContent = displayName;
+    if (visual?.tokenName) {
+      sub.textContent = `token: ${visual.tokenName}`;
+    } else if (visual?.actorName) {
+      sub.textContent = `actor: ${visual.actorName}`;
+    } else {
+      sub.textContent = runtimeStarted ? "token: not resolved" : "token: sync after Start";
+    }
+    state.textContent = formatNpcHeaderStateSummary(visual);
+
+    appendNpcAvatarImage({
+      avatar,
+      npcId,
+      displayName,
+      thumbnailUrl: resolvedThumb,
+    });
+  };
+
+  const controlActions = document.createElement("div");
+  controlActions.className = "npc-control-actions";
+
+  const toggle = document.createElement("label");
+  toggle.className = "npc-toggle";
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.checked = npc.enabled !== false;
+  const t = document.createElement("span");
+  t.textContent = cb.checked ? "Enabled" : "Disabled";
+  cb.addEventListener("change", () => {
+    npc.enabled = cb.checked;
+    t.textContent = cb.checked ? "Enabled" : "Disabled";
+    setConfigEditor(config);
+  });
+  toggle.appendChild(cb);
+  toggle.appendChild(t);
+
+  const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
+  deleteBtn.className = "danger";
+  deleteBtn.textContent = "Delete NPC";
+  deleteBtn.addEventListener("click", () => {
+    const answer = window.prompt(`'${npc.displayName || npc.id}' NPC를 정말 삭제하시겠습니까?\n삭제하려면 yes 를 입력하세요.`);
+    if (String(answer || "").trim().toLowerCase() !== "yes") return;
+    closeMdEditor({ force: true });
+    npcCardExpandedState.delete(npcId);
+    persistNpcCardExpandedStateToStorage();
+    npcVisualByNpcId.delete(npcId);
+    npcThumbnailFailureByNpcId.delete(npcId);
+    config.npcs.splice(i, 1);
+    setConfigEditor(config);
+    renderNpcList(config);
+    appendLog({
+      ts: Date.now(),
+      level: "info",
+      scope: "ui",
+      message: `NPC deleted: id=${npc.id} name=${npc.displayName || npc.id}`,
+    });
+  });
+
+  controlActions.appendChild(toggle);
+  controlActions.appendChild(deleteBtn);
+  controls.appendChild(controlActions);
+  updateSummary();
+  controls.appendChild(summary);
+
+  const displayRow = document.createElement("div");
+  displayRow.className = "npc-doc-row";
+  const displayLabel = document.createElement("label");
+  displayLabel.textContent = "NPC Display Name";
+  const displayInput = document.createElement("input");
+  displayInput.type = "text";
+  displayInput.placeholder = "Name used in chat";
+  displayInput.value = String(npc?.displayName || "");
+
+  const actorRow = document.createElement("div");
+  actorRow.className = "npc-doc-row";
+  const actorLabel = document.createElement("label");
+  actorLabel.textContent = "FVTT Actor Name";
+  const actorInput = document.createElement("input");
+  actorInput.type = "text";
+  actorInput.placeholder = "FVTT Actor name";
+  actorInput.value = String(npc?.actor?.value || "");
+
+  displayInput.addEventListener("change", () => {
+    const prevDisplay = String(npc.displayName || "");
+    const nextDisplay = String(displayInput.value || "").trim() || prevDisplay || npc.id || `npc_${i}`;
+    npc.displayName = nextDisplay;
+    const actorCurrent = String(npc?.actor?.value || "").trim();
+    if (!actorCurrent || actorCurrent === prevDisplay) {
+      npc.actor = npc.actor || { type: "name", value: "" };
+      npc.actor.type = "name";
+      npc.actor.value = nextDisplay;
+      actorInput.value = nextDisplay;
+    }
+    updateSummary();
+    renderCardHeader();
+    setConfigEditor(config);
+  });
+
+  actorInput.addEventListener("change", () => {
+    npc.actor = npc.actor || { type: "name", value: "" };
+    npc.actor.type = "name";
+    npc.actor.value = String(actorInput.value || "").trim();
+    npcVisualByNpcId.delete(npcId);
+    npcThumbnailFailureByNpcId.delete(npcId);
+    updateSummary();
+    renderCardHeader();
+    setConfigEditor(config);
+  });
+
+  actorRow.appendChild(actorLabel);
+  actorRow.appendChild(actorInput);
+
+  const reactRow = document.createElement("div");
+  reactRow.className = "npc-doc-row";
+  const reactLabel = document.createElement("label");
+  reactLabel.textContent = "React Distance <= (ft)";
+  const reactInput = document.createElement("input");
+  reactInput.type = "number";
+  reactInput.min = "0";
+  reactInput.step = "1";
+  reactInput.placeholder = "0 = disabled";
+  reactInput.value = String(Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 30);
+  reactInput.addEventListener("change", () => {
+    npc.triggers = npc.triggers || {};
+    const parsed = Number(reactInput.value);
+    npc.triggers.maxFt = Number.isFinite(parsed) && parsed >= 0 ? parsed : 30;
+    reactInput.value = String(npc.triggers.maxFt);
+    updateSummary();
+    setConfigEditor(config);
+  });
+  reactRow.appendChild(reactLabel);
+  reactRow.appendChild(reactInput);
+
+  const soulTarget = { kind: "npcDoc", npcIndex: i, docKey: "soul" };
+  const soulRow = createDocPathRow({
+    label: "Personality / Dialogue (.md)",
+    value: npc?.personaDocs?.soul || "",
+    placeholder: "C:\\docs\\npc-soul.md",
+    onChange: (v) => {
+      setDocTargetPath(config, soulTarget, v);
+      setConfigEditor(config);
+    },
+    onPick: () => pickMarkdownForTarget(soulTarget, { openEditor: false }),
+    onEdit: () => editTargetWithFallbackPick(soulTarget),
+  });
+
+  const battleTarget = { kind: "npcDoc", npcIndex: i, docKey: "battle" };
+  const battleRow = createDocPathRow({
+    label: "Battle Pattern (.md)",
+    value: npc?.personaDocs?.battle || "",
+    placeholder: "C:\\docs\\npc-battle.md",
+    onChange: (v) => {
+      setDocTargetPath(config, battleTarget, v);
+      setConfigEditor(config);
+    },
+    onPick: () => pickMarkdownForTarget(battleTarget, { openEditor: false }),
+    onEdit: () => editTargetWithFallbackPick(battleTarget),
+  });
+
+  const imageDetails = document.createElement("details");
+  imageDetails.className = "npc-image-details";
+  if (npc?.image?.enabled || String(npc?.image?.defaultPrompt || npc?.image?.baseTags || "").trim()) {
+    imageDetails.open = true;
+  }
+
+  const imageSummary = document.createElement("summary");
+  imageSummary.textContent = "Image Prompt Settings";
+  imageDetails.appendChild(imageSummary);
+
+  const imageBody = document.createElement("div");
+  imageBody.className = "npc-image-body";
+
+  const imageEnableRow = document.createElement("label");
+  imageEnableRow.className = "npc-toggle";
+  const imageEnableCb = document.createElement("input");
+  imageEnableCb.type = "checkbox";
+  imageEnableCb.checked = npc?.image?.enabled === true;
+  const imageEnableText = document.createElement("span");
+  imageEnableText.textContent = imageEnableCb.checked ? "Image Enabled" : "Image Disabled";
+  imageEnableCb.addEventListener("change", () => {
+    npc.image = npc.image || {};
+    npc.image.enabled = imageEnableCb.checked;
+    imageEnableText.textContent = imageEnableCb.checked ? "Image Enabled" : "Image Disabled";
+    updateSummary();
+    setConfigEditor(config);
+  });
+  imageEnableRow.appendChild(imageEnableCb);
+  imageEnableRow.appendChild(imageEnableText);
+
+  const imagePromptRow = document.createElement("div");
+  imagePromptRow.className = "npc-doc-row";
+  const imagePromptLabel = document.createElement("label");
+  imagePromptLabel.textContent = "NPC 기본 이미지 프롬프트";
+  const imagePromptArea = document.createElement("textarea");
+  imagePromptArea.className = "npc-textarea";
+  imagePromptArea.placeholder = "e.g. female knight, dark fantasy, dramatic lighting";
+  imagePromptArea.value = String(npc?.image?.defaultPrompt || npc?.image?.baseTags || "");
+  imagePromptArea.addEventListener("change", () => {
+    npc.image = npc.image || {};
+    npc.image.defaultPrompt = String(imagePromptArea.value || "").trim();
+    // Keep baseTags for backward compatibility with older runtime fields.
+    npc.image.baseTags = npc.image.defaultPrompt;
+    setConfigEditor(config);
+  });
+  imagePromptRow.appendChild(imagePromptLabel);
+  imagePromptRow.appendChild(imagePromptArea);
+
+  imageBody.appendChild(imageEnableRow);
+  imageBody.appendChild(imagePromptRow);
+  imageDetails.appendChild(imageBody);
+
+  controls.appendChild(displayRow);
+  displayRow.appendChild(displayLabel);
+  displayRow.appendChild(displayInput);
+  controls.appendChild(actorRow);
+  controls.appendChild(reactRow);
+  controls.appendChild(soulRow);
+  controls.appendChild(battleRow);
+  controls.appendChild(imageDetails);
+
+  meta.appendChild(name);
+  meta.appendChild(sub);
+  meta.appendChild(state);
+
+  headerMain.appendChild(avatar);
+  headerMain.appendChild(meta);
+  headerMain.appendChild(expandIndicator);
+  headerMain.addEventListener("click", () => {
+    const expanded = card.classList.contains("expanded");
+    setCardExpanded(!expanded, { reflow: true });
+  });
+
+  card.appendChild(headerMain);
+  card.appendChild(controls);
+  setCardExpanded(npcCardExpandedState.get(npcId) === true, { reflow: false });
+  renderCardHeader();
+  return card;
+}
+
+function renderNpcListStandard(list, config, npcs) {
+  list.classList.remove("virtualized");
   list.innerHTML = "";
-  config = ensureConfigShape(config || {});
-  const npcs = Array.isArray(config?.npcs) ? config.npcs : [];
+  for (let i = 0; i < npcs.length; i += 1) {
+    const npc = ensureNpcShape(npcs[i], i);
+    list.appendChild(createNpcCardElement(config, npc, i, { virtualized: false }));
+  }
+}
+
+function renderNpcListVirtualized(list, config, npcs) {
+  list.classList.add("virtualized");
+  if (!list.__npcVirtualScrollHandler) {
+    list.__npcVirtualScrollHandler = () => {
+      if (!list.classList.contains("virtualized")) return;
+      if (list.__npcVirtualScrollRaf) return;
+      list.__npcVirtualScrollRaf = window.requestAnimationFrame(() => {
+        list.__npcVirtualScrollRaf = 0;
+        renderNpcList(currentConfig || config);
+      });
+    };
+    list.addEventListener("scroll", list.__npcVirtualScrollHandler, { passive: true });
+  }
+
+  let inner = list.querySelector(".npc-virtual-inner");
+  if (!inner) {
+    list.innerHTML = "";
+    inner = document.createElement("div");
+    inner.className = "npc-virtual-inner";
+    list.appendChild(inner);
+  }
+
+  const heights = npcs.map((npc) => estimateNpcCardHeight(npc));
+  const tops = [];
+  let cursor = 0;
+  for (let i = 0; i < npcs.length; i += 1) {
+    tops.push(cursor);
+    cursor += heights[i] + NPC_VIRTUAL_CARD_GAP_PX;
+  }
+  const totalHeight = Math.max(0, cursor - NPC_VIRTUAL_CARD_GAP_PX);
+  inner.style.height = `${totalHeight}px`;
 
   if (!npcs.length) {
+    inner.innerHTML = "";
+    return;
+  }
+
+  const viewTop = Number(list.scrollTop || 0);
+  const viewHeight = Math.max(1, Number(list.clientHeight || 720));
+  const minY = Math.max(0, viewTop - NPC_VIRTUAL_OVERSCAN_PX);
+  const maxY = viewTop + viewHeight + NPC_VIRTUAL_OVERSCAN_PX;
+
+  let start = 0;
+  while (start < npcs.length && tops[start] + heights[start] < minY) {
+    start += 1;
+  }
+  if (start >= npcs.length) {
+    start = npcs.length - 1;
+  }
+
+  let endExclusive = start;
+  while (endExclusive < npcs.length && tops[endExclusive] <= maxY) {
+    endExclusive += 1;
+  }
+  const end = Math.max(start, Math.min(npcs.length - 1, endExclusive - 1));
+
+  inner.innerHTML = "";
+  for (let i = start; i <= end; i += 1) {
+    const npc = ensureNpcShape(npcs[i], i);
+    const card = createNpcCardElement(config, npc, i, { virtualized: true });
+    card.style.position = "absolute";
+    card.style.left = "0";
+    card.style.right = "0";
+    card.style.top = `${tops[i]}px`;
+    card.style.height = `${heights[i]}px`;
+    inner.appendChild(card);
+  }
+}
+
+function renderNpcList(config) {
+  const list = $("npc-list");
+  if (!list) return;
+
+  loadNpcCardExpandedStateFromStorage();
+  config = ensureConfigShape(config || {});
+  pruneNpcUiState(config);
+
+  const npcs = Array.isArray(config?.npcs) ? config.npcs : [];
+  if (!npcs.length) {
+    list.classList.remove("virtualized");
+    list.innerHTML = "";
     const empty = document.createElement("div");
     empty.className = "muted";
     empty.textContent = "(No NPCs)";
@@ -764,292 +1389,12 @@ function renderNpcList(config) {
     return;
   }
 
-  for (let i = 0; i < npcs.length; i += 1) {
-    const npc = ensureNpcShape(npcs[i], i);
-    const npcId = String(npc?.id || `npc_${i}`);
-    const card = document.createElement("div");
-    card.className = "npc-card";
-
-    const headerMain = document.createElement("button");
-    headerMain.type = "button";
-    headerMain.className = "npc-header-main";
-
-    const avatar = document.createElement("div");
-    avatar.className = "npc-avatar";
-
-    const meta = document.createElement("div");
-    meta.className = "npc-meta";
-
-    const name = document.createElement("div");
-    name.className = "npc-name";
-
-    const sub = document.createElement("div");
-    sub.className = "npc-sub";
-
-    const expandIndicator = document.createElement("span");
-    expandIndicator.className = "npc-expand-indicator";
-    expandIndicator.textContent = "▾";
-
-    const setCardExpanded = (nextExpanded) => {
-      const expanded = Boolean(nextExpanded);
-      npcCardExpandedState.set(npcId, expanded);
-      card.classList.toggle("expanded", expanded);
-      headerMain.setAttribute("aria-expanded", expanded ? "true" : "false");
-    };
-
-    const renderCardHeader = () => {
-      const visual = npcVisualByNpcId.get(npcId) || null;
-      const displayName = String(npc.displayName || npc.id || `npc_${i}`);
-      const resolvedThumb = resolveNpcThumbnailUrl(visual?.thumbnail || "", config);
-      name.textContent = displayName;
-      sub.textContent = visual?.tokenName
-        ? `token: ${visual.tokenName}`
-        : runtimeStarted
-          ? "token: not resolved"
-          : "token: sync after Start";
-
-      avatar.innerHTML = "";
-      if (resolvedThumb) {
-        const img = document.createElement("img");
-        img.src = resolvedThumb;
-        img.alt = `${displayName} token`;
-        img.loading = "lazy";
-        avatar.appendChild(img);
-      } else {
-        const fallback = document.createElement("div");
-        fallback.className = "npc-avatar-fallback";
-        fallback.textContent = fallbackAvatarText(displayName);
-        avatar.appendChild(fallback);
-      }
-    };
-
-    const controls = document.createElement("div");
-    controls.className = "npc-controls";
-
-    const controlActions = document.createElement("div");
-    controlActions.className = "npc-control-actions";
-
-    const toggle = document.createElement("label");
-    toggle.className = "npc-toggle";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.checked = npc.enabled !== false;
-    const t = document.createElement("span");
-    t.textContent = cb.checked ? "Enabled" : "Disabled";
-    cb.addEventListener("change", () => {
-      npc.enabled = cb.checked;
-      t.textContent = cb.checked ? "Enabled" : "Disabled";
-      setConfigEditor(config);
-    });
-    toggle.appendChild(cb);
-    toggle.appendChild(t);
-
-    const deleteBtn = document.createElement("button");
-    deleteBtn.type = "button";
-    deleteBtn.className = "danger";
-    deleteBtn.textContent = "Delete NPC";
-    deleteBtn.addEventListener("click", () => {
-      const answer = window.prompt(
-        `'${npc.displayName || npc.id}' NPC를 정말 삭제하시겠습니까?\n삭제하려면 yes 를 입력하세요.`
-      );
-      if (String(answer || "").trim().toLowerCase() !== "yes") return;
-      closeMdEditor({ force: true });
-      npcCardExpandedState.delete(npcId);
-      npcVisualByNpcId.delete(npcId);
-      config.npcs.splice(i, 1);
-      setConfigEditor(config);
-      renderNpcList(config);
-      appendLog({
-        ts: Date.now(),
-        level: "info",
-        scope: "ui",
-        message: `NPC deleted: id=${npc.id} name=${npc.displayName || npc.id}`,
-      });
-    });
-
-    controlActions.appendChild(toggle);
-    controlActions.appendChild(deleteBtn);
-    controls.appendChild(controlActions);
-
-    const summary = document.createElement("div");
-    summary.className = "npc-summary";
-    summary.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
-    controls.appendChild(summary);
-
-    const displayRow = document.createElement("div");
-    displayRow.className = "npc-doc-row";
-
-    const displayLabel = document.createElement("label");
-    displayLabel.textContent = "NPC Display Name";
-
-    const displayInput = document.createElement("input");
-    displayInput.type = "text";
-    displayInput.placeholder = "Name used in chat";
-    displayInput.value = String(npc?.displayName || "");
-    displayInput.addEventListener("change", () => {
-      const prevDisplay = String(npc.displayName || "");
-      const nextDisplay = String(displayInput.value || "").trim() || prevDisplay || npc.id || `npc_${i}`;
-      npc.displayName = nextDisplay;
-      const actorCurrent = String(npc?.actor?.value || "").trim();
-      if (!actorCurrent || actorCurrent === prevDisplay) {
-        npc.actor = npc.actor || { type: "name", value: "" };
-        npc.actor.type = "name";
-        npc.actor.value = nextDisplay;
-        actorInput.value = nextDisplay;
-      }
-      summary.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
-      renderCardHeader();
-      setConfigEditor(config);
-    });
-
-    const actorRow = document.createElement("div");
-    actorRow.className = "npc-doc-row";
-
-    const actorLabel = document.createElement("label");
-    actorLabel.textContent = "FVTT Actor Name";
-
-    const actorInput = document.createElement("input");
-    actorInput.type = "text";
-    actorInput.placeholder = "FVTT Actor name";
-    actorInput.value = String(npc?.actor?.value || "");
-    actorInput.addEventListener("change", () => {
-      npc.actor = npc.actor || { type: "name", value: "" };
-      npc.actor.type = "name";
-      npc.actor.value = String(actorInput.value || "").trim();
-      npcVisualByNpcId.delete(npcId);
-      summary.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
-      renderCardHeader();
-      setConfigEditor(config);
-    });
-
-    actorRow.appendChild(actorLabel);
-    actorRow.appendChild(actorInput);
-
-    const reactRow = document.createElement("div");
-    reactRow.className = "npc-doc-row";
-
-    const reactLabel = document.createElement("label");
-    reactLabel.textContent = "React Distance <= (ft)";
-
-    const reactInput = document.createElement("input");
-    reactInput.type = "number";
-    reactInput.min = "0";
-    reactInput.step = "1";
-    reactInput.placeholder = "0 = disabled";
-    reactInput.value = String(Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 30);
-    reactInput.addEventListener("change", () => {
-      npc.triggers = npc.triggers || {};
-      const parsed = Number(reactInput.value);
-      npc.triggers.maxFt = Number.isFinite(parsed) && parsed >= 0 ? parsed : 30;
-      reactInput.value = String(npc.triggers.maxFt);
-      summary.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
-      setConfigEditor(config);
-    });
-
-    reactRow.appendChild(reactLabel);
-    reactRow.appendChild(reactInput);
-
-    const soulTarget = { kind: "npcDoc", npcIndex: i, docKey: "soul" };
-    const soulRow = createDocPathRow({
-      label: "Personality / Dialogue (.md)",
-      value: npc?.personaDocs?.soul || "",
-      placeholder: "C:\\docs\\npc-soul.md",
-      onChange: (v) => {
-        setDocTargetPath(config, soulTarget, v);
-        setConfigEditor(config);
-      },
-      onPick: () => pickMarkdownForTarget(soulTarget, { openEditor: false }),
-      onEdit: () => editTargetWithFallbackPick(soulTarget),
-    });
-
-    const battleTarget = { kind: "npcDoc", npcIndex: i, docKey: "battle" };
-    const battleRow = createDocPathRow({
-      label: "Battle Pattern (.md)",
-      value: npc?.personaDocs?.battle || "",
-      placeholder: "C:\\docs\\npc-battle.md",
-      onChange: (v) => {
-        setDocTargetPath(config, battleTarget, v);
-        setConfigEditor(config);
-      },
-      onPick: () => pickMarkdownForTarget(battleTarget, { openEditor: false }),
-      onEdit: () => editTargetWithFallbackPick(battleTarget),
-    });
-
-    const imageDetails = document.createElement("details");
-    imageDetails.className = "npc-image-details";
-    if (npc?.image?.enabled || String(npc?.image?.defaultPrompt || npc?.image?.baseTags || "").trim()) {
-      imageDetails.open = true;
-    }
-
-    const imageSummary = document.createElement("summary");
-    imageSummary.textContent = "Image Prompt Settings";
-    imageDetails.appendChild(imageSummary);
-
-    const imageBody = document.createElement("div");
-    imageBody.className = "npc-image-body";
-
-    const imageEnableRow = document.createElement("label");
-    imageEnableRow.className = "npc-toggle";
-    const imageEnableCb = document.createElement("input");
-    imageEnableCb.type = "checkbox";
-    imageEnableCb.checked = npc?.image?.enabled === true;
-    const imageEnableText = document.createElement("span");
-    imageEnableText.textContent = imageEnableCb.checked ? "Image Enabled" : "Image Disabled";
-    imageEnableCb.addEventListener("change", () => {
-      npc.image = npc.image || {};
-      npc.image.enabled = imageEnableCb.checked;
-      imageEnableText.textContent = imageEnableCb.checked ? "Image Enabled" : "Image Disabled";
-      summary.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
-      setConfigEditor(config);
-    });
-    imageEnableRow.appendChild(imageEnableCb);
-    imageEnableRow.appendChild(imageEnableText);
-
-    const imagePromptRow = document.createElement("div");
-    imagePromptRow.className = "npc-doc-row";
-    const imagePromptLabel = document.createElement("label");
-    imagePromptLabel.textContent = "NPC 기본 이미지 프롬프트";
-    const imagePromptArea = document.createElement("textarea");
-    imagePromptArea.className = "npc-textarea";
-    imagePromptArea.placeholder = "e.g. female knight, dark fantasy, dramatic lighting";
-    imagePromptArea.value = String(npc?.image?.defaultPrompt || npc?.image?.baseTags || "");
-    imagePromptArea.addEventListener("change", () => {
-      npc.image = npc.image || {};
-      npc.image.defaultPrompt = String(imagePromptArea.value || "").trim();
-      // Keep baseTags for backward compatibility with older runtime fields.
-      npc.image.baseTags = npc.image.defaultPrompt;
-      setConfigEditor(config);
-    });
-    imagePromptRow.appendChild(imagePromptLabel);
-    imagePromptRow.appendChild(imagePromptArea);
-
-    imageBody.appendChild(imageEnableRow);
-    imageBody.appendChild(imagePromptRow);
-    imageDetails.appendChild(imageBody);
-
-    controls.appendChild(displayRow);
-    displayRow.appendChild(displayLabel);
-    displayRow.appendChild(displayInput);
-    controls.appendChild(actorRow);
-    controls.appendChild(reactRow);
-    controls.appendChild(soulRow);
-    controls.appendChild(battleRow);
-    controls.appendChild(imageDetails);
-
-    headerMain.appendChild(avatar);
-    headerMain.appendChild(meta);
-    headerMain.appendChild(expandIndicator);
-    headerMain.addEventListener("click", () => {
-      const expanded = card.classList.contains("expanded");
-      setCardExpanded(!expanded);
-    });
-
-    card.appendChild(headerMain);
-    card.appendChild(controls);
-    setCardExpanded(npcCardExpandedState.get(npcId) === true);
-    renderCardHeader();
-    list.appendChild(card);
+  if (shouldUseNpcVirtualization(npcs)) {
+    renderNpcListVirtualized(list, config, npcs);
+    return;
   }
+
+  renderNpcListStandard(list, config, npcs);
 }
 
 async function loadConfigFromMainProcess() {
@@ -1226,6 +1571,9 @@ async function init() {
       currentConfig = ensureConfigShape(currentConfig || {});
       const nextNpc = createNpcTemplate(currentConfig);
       currentConfig.npcs.push(nextNpc);
+      npcCardExpandedState.set(String(nextNpc.id || ""), false);
+      npcThumbnailFailureByNpcId.delete(String(nextNpc.id || ""));
+      persistNpcCardExpandedStateToStorage();
       setConfigEditor(currentConfig);
       renderNpcList(currentConfig);
       appendLog({
@@ -1486,6 +1834,12 @@ async function init() {
       scope: "ui",
       message: "Spec is at: fvtt-ai-runtime/Spec.md (open in your editor).",
     });
+  });
+
+  window.addEventListener("resize", () => {
+    if (currentConfig) {
+      renderNpcList(currentConfig);
+    }
   });
 }
 
