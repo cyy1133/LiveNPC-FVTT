@@ -1987,6 +1987,9 @@ class AppRuntime {
     this.fvtt = null;
     this.started = false;
     this.queue = Promise.resolve();
+    this._runTokenSeq = 0;
+    this._activeRunToken = 0;
+    this._stopRequested = false;
 
     this._persistConfig = null;
     this._configRef = null;
@@ -2009,9 +2012,58 @@ class AppRuntime {
     this._traceWriteWarned = false;
   }
 
+  _beginRunToken() {
+    this._runTokenSeq += 1;
+    this._activeRunToken = this._runTokenSeq;
+    this._stopRequested = false;
+    return this._activeRunToken;
+  }
+
+  _invalidateRunToken() {
+    this._runTokenSeq += 1;
+    this._activeRunToken = this._runTokenSeq;
+    this._stopRequested = true;
+    return this._activeRunToken;
+  }
+
+  _isRunTokenActive(runToken) {
+    const token = Number(runToken || 0);
+    return this.started && !this._stopRequested && token > 0 && token === this._activeRunToken;
+  }
+
+  _isRuntimeAbortError(error) {
+    if (!error) return false;
+    const name = String(error?.name || "");
+    const message = String(error?.message || error || "");
+    return name === "RuntimeAbortError" || /runtime-(stopping|stopped|aborted)/i.test(message);
+  }
+
+  _throwIfRuntimeStopped(runToken, reason = "runtime-stopped") {
+    const token = Number(runToken || 0);
+    if (token > 0) {
+      if (this._isRunTokenActive(token)) return;
+    } else if (this.started && !this._stopRequested) {
+      return;
+    }
+    const error = new Error(reason);
+    error.name = "RuntimeAbortError";
+    throw error;
+  }
+
+  _enqueueSerialTask(taskFn, runToken = this._activeRunToken) {
+    this.queue = this.queue
+      .catch(() => null)
+      .then(async () => {
+        this._throwIfRuntimeStopped(runToken);
+        return await taskFn(runToken);
+      });
+    return this.queue;
+  }
+
   async start({ config, persistConfig } = {}) {
     if (this.started) return;
     this.started = true;
+    const runToken = this._beginRunToken();
     this._persistConfig = typeof persistConfig === "function" ? persistConfig : null;
     this._configRef = config && typeof config === "object" ? config : null;
 
@@ -2027,6 +2079,7 @@ class AppRuntime {
     this._fvttInboundCutoffTs = Date.now();
     this._trace("runtime.start", {
       provider: this._getLlmProvider(config),
+      runToken,
       fvttInboundCutoffTs: this._fvttInboundCutoffTs,
       appDataDir: this.appDataDir || process.cwd(),
       npcs: pickEnabledNpcs(config).map((npc) => ({
@@ -2087,13 +2140,16 @@ class AppRuntime {
   async stop() {
     if (!this.started) return;
     this.started = false;
+    const invalidatedRunToken = this._invalidateRunToken();
     this.log.info("runtime", "stopping...");
+    this._trace("runtime.stop", { invalidatedRunToken });
 
     this._persistConfig = null;
     this._configRef = null;
     this._fvttInboundCutoffTs = 0;
     this._processedCombatTurnKeysByNpc.clear();
     this._lastCombatStateByNpc.clear();
+    this._stopFvttObservers();
 
     if (this.discord) {
       try {
@@ -2112,8 +2168,6 @@ class AppRuntime {
       }
       this.fvtt = null;
     }
-
-    this._stopFvttObservers();
 
     this._trace("runtime.stopped", { ok: true });
     await this._flushTrace();
@@ -2486,10 +2540,11 @@ class AppRuntime {
       });
 
       // Queue to keep FVTT actions serialized.
-      this.queue = this.queue.then(() =>
-        this._handleNpcFvttInbound({ config, npc: hitNpc, speaker, text: content })
-      );
-      await this.queue.catch(() => {});
+      await this._enqueueSerialTask((runToken) =>
+        this._handleNpcFvttInbound({ config, npc: hitNpc, speaker, text: content, runToken })
+      ).catch((e) => {
+        if (!this._isRuntimeAbortError(e)) throw e;
+      });
     }
   }
 
@@ -2567,15 +2622,16 @@ class AppRuntime {
           prev: prevSnapshot,
           current: currentSnapshot,
         });
-        this.queue = this.queue.then(() =>
+        await this._enqueueSerialTask((runToken) =>
           this._handleNpcCombatEnd({
             config,
             npc,
             prevCombatState: prevSnapshot,
             combatState: state,
+            runToken,
           })
-        );
-        await this.queue.catch((e) => {
+        ).catch((e) => {
+          if (this._isRuntimeAbortError(e)) return;
           this.log.warn("combat", `end speech failed (${npcName}): ${e?.message || e}`);
           this._trace("fvtt.combat.end.error", {
             npcId: npc?.id || "",
@@ -2609,8 +2665,8 @@ class AppRuntime {
         turn: Number(state?.combat?.turn ?? state?.turn ?? -1),
       });
 
-      this.queue = this.queue.then(() => this._handleNpcCombatTurn({ config, npc, combatState: state }));
-      await this.queue.catch((e) => {
+      await this._enqueueSerialTask((runToken) => this._handleNpcCombatTurn({ config, npc, combatState: state, runToken })).catch((e) => {
+        if (this._isRuntimeAbortError(e)) return;
         this.log.warn("combat", `turn handler failed (${npcName}): ${e?.message || e}`);
         this._trace("fvtt.combat.turn.error", {
           npcId: npc?.id || "",
@@ -2622,7 +2678,8 @@ class AppRuntime {
     }
   }
 
-  async _handleNpcCombatTurn({ config, npc, combatState }) {
+  async _handleNpcCombatTurn({ config, npc, combatState, runToken = 0 }) {
+    this._throwIfRuntimeStopped(runToken);
     const npcName = String(npc?.displayName || npc?.id || "NPC");
     const turnKey = String(combatState?.turnKey || "").trim();
     let text = buildCombatTurnInboundText({ npcName, combatState });
@@ -2635,6 +2692,7 @@ class AppRuntime {
     });
 
     const personaText = await loadNpcPromptDocs({ config, npc });
+    this._throwIfRuntimeStopped(runToken);
 
     let fvttChatContext = [];
     let fvttSceneContext = null;
@@ -2642,12 +2700,15 @@ class AppRuntime {
     try {
       const chat = await this.fvtt.getRecentChat(10);
       if (chat?.ok) fvttChatContext = chat.messages || [];
-      fvttSceneContext = await this._getTacticalSceneContext(npc, 60);
-      fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet());
+      this._throwIfRuntimeStopped(runToken);
+      fvttSceneContext = await this._getTacticalSceneContext(npc, 60, runToken);
+      fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet(), { runToken });
     } catch (e) {
+      if (this._isRuntimeAbortError(e)) return;
       this.log.warn("combat", `context build failed (${npcName}): ${e?.message || e}`);
       this._trace("fvtt.combat.turn.context.error", { npcId: npc?.id || "", npcName, error: e });
     }
+    this._throwIfRuntimeStopped(runToken);
 
     if (this._traceIncludeContexts) {
       this._trace("fvtt.combat.turn.context", {
@@ -2695,6 +2756,7 @@ class AppRuntime {
           turnKey,
         },
       });
+      this._throwIfRuntimeStopped(runToken);
       const normalized = normalizeIntent(completion.parsed);
       const actionTag = extractFvttActionTags(normalized.replyText);
       replyText = actionTag.hadTag ? actionTag.visibleText || "(...)" : normalized.replyText || "(...)";
@@ -2745,6 +2807,7 @@ class AppRuntime {
       });
       this.log.info("llm", `intent(combat): type=${intent.type} args=${compact(JSON.stringify(intent.args), 220)}`);
     } catch (e) {
+      if (this._isRuntimeAbortError(e)) return;
       this.log.error("llm", `LLM failed (combat turn): ${e?.message || e}`);
       this._maybeLogOpenAiScopeHint(e, config);
       this._trace("llm.error.combat", { npcId: npc?.id || "", npcName, turnKey, error: e });
@@ -2770,7 +2833,8 @@ class AppRuntime {
     const startSpeech = hasPlannedSay ? "" : String(replyText || "").trim();
     if (startSpeech) {
       try {
-        await this._withNpcActor(npc, () => this.fvtt.speakAsActor(startSpeech));
+        this._throwIfRuntimeStopped(runToken);
+        await this._withNpcActor(npc, () => this.fvtt.speakAsActor(startSpeech), { runToken });
         this._trace("fvtt.speak.outbound", {
           npcId: npc?.id || "",
           npcName,
@@ -2779,6 +2843,7 @@ class AppRuntime {
           turnKey,
         });
       } catch (e) {
+        if (this._isRuntimeAbortError(e)) return;
         this.log.warn("combat", `start speech failed (${npcName}): ${e?.message || e}`);
         this._trace("fvtt.speak.error", {
           npcId: npc?.id || "",
@@ -2792,6 +2857,7 @@ class AppRuntime {
     // 2) Action execution
     if (intent?.type && intent.type !== "none") {
       try {
+        this._throwIfRuntimeStopped(runToken);
         this._trace("fvtt.intent.execute.start", {
           npcId: npc?.id || "",
           intent,
@@ -2806,6 +2872,7 @@ class AppRuntime {
           origin: "combat-turn",
           strict: strictExecution,
           execution: { fvttActorSheet, combatState },
+          runToken,
         });
         this._trace("fvtt.intent.execute.done", {
           npcId: npc?.id || "",
@@ -2814,6 +2881,7 @@ class AppRuntime {
           turnKey,
         });
       } catch (e) {
+        if (this._isRuntimeAbortError(e)) return;
         this.log.warn("combat", `intent failed (${npcName}): ${e?.message || e}`);
         this._trace("fvtt.intent.execute.error", {
           npcId: npc?.id || "",
@@ -2828,7 +2896,8 @@ class AppRuntime {
     // 3) Turn end handoff to next combatant
     let endTurn = null;
     try {
-      endTurn = await this._withNpcActor(npc, () => this.fvtt.endActorCombatTurn(turnKey));
+      this._throwIfRuntimeStopped(runToken);
+      endTurn = await this._withNpcActor(npc, () => this.fvtt.endActorCombatTurn(turnKey), { runToken });
       this._trace("fvtt.combat.turn.end", {
         npcId: npc?.id || "",
         npcName,
@@ -2846,7 +2915,8 @@ class AppRuntime {
 
       if (needsAdvanceRetry) {
         await new Promise((resolve) => setTimeout(resolve, 350));
-        const verify = await this._withNpcActor(npc, () => this.fvtt.getActorCombatState());
+        this._throwIfRuntimeStopped(runToken);
+        const verify = await this._withNpcActor(npc, () => this.fvtt.getActorCombatState(), { runToken });
         this._trace("fvtt.combat.turn.end.verify", {
           npcId: npc?.id || "",
           npcName,
@@ -2855,7 +2925,7 @@ class AppRuntime {
           firstResult: endTurn || null,
         });
         if (verify?.ok && verify?.isActorTurn && String(verify?.turnKey || "").trim() === turnKey) {
-          const retry = await this._withNpcActor(npc, () => this.fvtt.endActorCombatTurn(turnKey));
+          const retry = await this._withNpcActor(npc, () => this.fvtt.endActorCombatTurn(turnKey), { runToken });
           this._trace("fvtt.combat.turn.end.retry", {
             npcId: npc?.id || "",
             npcName,
@@ -2885,6 +2955,7 @@ class AppRuntime {
         );
       }
     } catch (e) {
+      if (this._isRuntimeAbortError(e)) return;
       this.log.warn("combat", `turn end failed (${npcName}): ${e?.message || e}`);
       this._trace("fvtt.combat.turn.end.error", {
         npcId: npc?.id || "",
@@ -2898,7 +2969,8 @@ class AppRuntime {
     if (endTurn?.ok && !endTurn?.skipped) {
       const endSpeech = "행동을 마치고 턴을 넘긴다.";
       try {
-        await this._withNpcActor(npc, () => this.fvtt.speakAsActor(endSpeech));
+        this._throwIfRuntimeStopped(runToken);
+        await this._withNpcActor(npc, () => this.fvtt.speakAsActor(endSpeech), { runToken });
         this._trace("fvtt.speak.outbound", {
           npcId: npc?.id || "",
           npcName,
@@ -2907,6 +2979,7 @@ class AppRuntime {
           turnKey,
         });
       } catch (e) {
+        if (this._isRuntimeAbortError(e)) return;
         this.log.warn("combat", `end speech failed (${npcName}): ${e?.message || e}`);
         this._trace("fvtt.speak.error", {
           npcId: npc?.id || "",
@@ -2918,7 +2991,8 @@ class AppRuntime {
     }
   }
 
-  async _handleNpcCombatEnd({ config, npc, prevCombatState, combatState }) {
+  async _handleNpcCombatEnd({ config, npc, prevCombatState, combatState, runToken = 0 }) {
+    this._throwIfRuntimeStopped(runToken);
     const npcName = String(npc?.displayName || npc?.id || "NPC");
     this._trace("fvtt.combat.end.handle.start", {
       npcId: npc?.id || "",
@@ -2928,6 +3002,7 @@ class AppRuntime {
     });
 
     const personaText = await loadNpcPromptDocs({ config, npc });
+    this._throwIfRuntimeStopped(runToken);
     let fvttChatContext = [];
     let fvttSceneContext = null;
     let fvttActorSheet = null;
@@ -2935,9 +3010,11 @@ class AppRuntime {
     try {
       const chat = await this.fvtt.getRecentChat(10);
       if (chat?.ok) fvttChatContext = chat.messages || [];
-      fvttSceneContext = await this._getTacticalSceneContext(npc, 60);
-      fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet());
+      this._throwIfRuntimeStopped(runToken);
+      fvttSceneContext = await this._getTacticalSceneContext(npc, 60, runToken);
+      fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet(), { runToken });
     } catch (e) {
+      if (this._isRuntimeAbortError(e)) return;
       this.log.warn("combat", `end context build failed (${npcName}): ${e?.message || e}`);
       this._trace("fvtt.combat.end.context.error", { npcId: npc?.id || "", npcName, error: e });
     }
@@ -2973,6 +3050,7 @@ class AppRuntime {
           npcName,
         },
       });
+      this._throwIfRuntimeStopped(runToken);
       const normalized = normalizeIntent(completion.parsed);
       const actionTag = extractFvttActionTags(normalized.replyText);
       replyText = actionTag.hadTag ? actionTag.visibleText || "" : String(normalized.replyText || "");
@@ -2984,6 +3062,7 @@ class AppRuntime {
         actionTag,
       });
     } catch (e) {
+      if (this._isRuntimeAbortError(e)) return;
       this.log.warn("llm", `LLM failed (combat end): ${e?.message || e}`);
       this._trace("llm.error.combat.end", { npcId: npc?.id || "", npcName, error: e });
     }
@@ -2996,7 +3075,8 @@ class AppRuntime {
     if (!speech) return;
 
     try {
-      await this._withNpcActor(npc, () => this.fvtt.speakAsActor(speech));
+      this._throwIfRuntimeStopped(runToken);
+      await this._withNpcActor(npc, () => this.fvtt.speakAsActor(speech), { runToken });
       this._trace("fvtt.speak.outbound", {
         npcId: npc?.id || "",
         npcName,
@@ -3004,6 +3084,7 @@ class AppRuntime {
         origin: "combat-end",
       });
     } catch (e) {
+      if (this._isRuntimeAbortError(e)) return;
       this.log.warn("combat", `end speech failed (${npcName}): ${e?.message || e}`);
       this._trace("fvtt.speak.error", {
         npcId: npc?.id || "",
@@ -3014,7 +3095,8 @@ class AppRuntime {
     }
   }
 
-  async _handleNpcFvttInbound({ config, npc, speaker, text }) {
+  async _handleNpcFvttInbound({ config, npc, speaker, text, runToken = 0 }) {
+    this._throwIfRuntimeStopped(runToken);
     const npcName = String(npc?.displayName || npc?.id || "NPC");
     this.log.info("fvtt", `inbound -> ${npcName} (speaker=${speaker || "?"}): ${compact(text, 180)}`);
     this._trace("fvtt.inbound.handle.start", {
@@ -3025,6 +3107,7 @@ class AppRuntime {
     });
 
     const personaText = await loadNpcPromptDocs({ config, npc });
+    this._throwIfRuntimeStopped(runToken);
 
     // Build FVTT-only context for LLM
     let fvttChatContext = [];
@@ -3034,8 +3117,9 @@ class AppRuntime {
     try {
       const chat = await this.fvtt.getRecentChat(10);
       if (chat?.ok) fvttChatContext = chat.messages || [];
-      fvttSceneContext = await this._getTacticalSceneContext(npc, 60);
-      fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet());
+      this._throwIfRuntimeStopped(runToken);
+      fvttSceneContext = await this._getTacticalSceneContext(npc, 60, runToken);
+      fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet(), { runToken });
       const sceneTokens = await this.fvtt.listSceneTokens();
       if (sceneTokens?.ok) {
         mentionedSceneTokens = collectMentionedSceneTokens({
@@ -3045,9 +3129,11 @@ class AppRuntime {
         });
       }
     } catch (e) {
+      if (this._isRuntimeAbortError(e)) return;
       this.log.warn("fvtt", `context build failed: ${e?.message || e}`);
       this._trace("fvtt.inbound.context.error", { npcId: npc?.id || "", error: e });
     }
+    this._throwIfRuntimeStopped(runToken);
 
     if (this._traceIncludeContexts) {
       this._trace("fvtt.inbound.context", {
@@ -3111,6 +3197,7 @@ class AppRuntime {
           npcName,
         },
       });
+      this._throwIfRuntimeStopped(runToken);
       const normalized = normalizeIntent(completion.parsed);
       const actionTag = extractFvttActionTags(normalized.replyText);
       replyText = actionTag.hadTag ? actionTag.visibleText || "(...)" : normalized.replyText || "(...)";
@@ -3159,6 +3246,7 @@ class AppRuntime {
       });
       this.log.info("llm", `intent(fvtt): type=${intent.type} args=${compact(JSON.stringify(intent.args), 220)}`);
     } catch (e) {
+      if (this._isRuntimeAbortError(e)) return;
       this.log.error("llm", `LLM failed (fvtt inbound): ${e?.message || e}`);
       this._maybeLogOpenAiScopeHint(e, config);
       this._trace("llm.error.fvtt", { npcId: npc?.id || "", error: e });
@@ -3167,22 +3255,25 @@ class AppRuntime {
 
     if (intent?.type && intent.type !== "none") {
       try {
+        this._throwIfRuntimeStopped(runToken);
         this._trace("fvtt.intent.execute.start", {
           npcId: npc?.id || "",
           intent,
           origin: "fvtt",
           strictExecution,
         });
-        await this._executeIntentPlan({ config, npc, intent, origin: "fvtt", strict: strictExecution });
+        await this._executeIntentPlan({ config, npc, intent, origin: "fvtt", strict: strictExecution, runToken });
         this._trace("fvtt.intent.execute.done", { npcId: npc?.id || "", intentType: intent?.type || "none" });
       } catch (e) {
+        if (this._isRuntimeAbortError(e)) return;
         this.log.warn("fvtt", `intent failed: ${e?.message || e}`);
         this._trace("fvtt.intent.execute.error", { npcId: npc?.id || "", error: e, intent });
       }
     }
 
     try {
-      await this._withNpcActor(npc, () => this.fvtt.speakAsActor(replyText));
+      this._throwIfRuntimeStopped(runToken);
+      await this._withNpcActor(npc, () => this.fvtt.speakAsActor(replyText), { runToken });
       this._trace("fvtt.speak.outbound", {
         npcId: npc?.id || "",
         npcName,
@@ -3190,6 +3281,7 @@ class AppRuntime {
         origin: "fvtt",
       });
     } catch (e) {
+      if (this._isRuntimeAbortError(e)) return;
       this.log.warn("fvtt", `speak failed: ${e?.message || e}`);
       this._trace("fvtt.speak.error", { npcId: npc?.id || "", error: e, origin: "fvtt" });
     }
@@ -3444,15 +3536,19 @@ class AppRuntime {
       }
 
       // Queue per runtime to avoid concurrent page.evaluate / token conflicts.
-      this.queue = this.queue.then(() => this._handleNpcDiscordMessage({ config, npc, message, text: cleaned }));
-      await this.queue.catch(() => {});
+      await this._enqueueSerialTask((runToken) =>
+        this._handleNpcDiscordMessage({ config, npc, message, text: cleaned, runToken })
+      ).catch((e) => {
+        if (!this._isRuntimeAbortError(e)) throw e;
+      });
     });
 
     await client.login(token);
     this.discord = client;
   }
 
-  async _withNpcActor(npc, fn) {
+  async _withNpcActor(npc, fn, { runToken = 0 } = {}) {
+    this._throwIfRuntimeStopped(runToken);
     if (!this.fvtt) throw new Error("FVTT not configured");
     const sel = actorSelectorForNpc(npc);
     const foundry = this.fvtt.config.foundry;
@@ -3461,7 +3557,9 @@ class AppRuntime {
     foundry.actorId = sel.actorId;
     foundry.actorName = sel.actorName;
     try {
-      return await fn();
+      const result = await fn();
+      this._throwIfRuntimeStopped(runToken);
+      return result;
     } finally {
       foundry.actorId = prevId;
       foundry.actorName = prevName;
@@ -3919,7 +4017,8 @@ class AppRuntime {
     return { steps: kept, limits, usage, skipped };
   }
 
-  async _executeIntentPlan({ config, npc, intent, origin, strict = false, execution = {} }) {
+  async _executeIntentPlan({ config, npc, intent, origin, strict = false, execution = {}, runToken = 0 }) {
+    this._throwIfRuntimeStopped(runToken);
     let steps = this._expandIntentToSteps(intent);
     if (!steps.length) return;
     const normalizedOrigin = String(origin || "").trim();
@@ -3958,6 +4057,7 @@ class AppRuntime {
 
     this.log.info("fvtt", `plan(${normalizedOrigin || "msg"}): ${steps.map((s) => s.type).join(" -> ")}`);
     for (let i = 0; i < steps.length; i += 1) {
+      this._throwIfRuntimeStopped(runToken);
       const step = steps[i];
       const executionHint = {
         origin: normalizedOrigin,
@@ -3984,8 +4084,10 @@ class AppRuntime {
           intent: step,
           strict,
           execution: executionHint,
+          runToken,
         });
       } catch (e) {
+        if (this._isRuntimeAbortError(e)) throw e;
         this._trace("fvtt.plan.step.callback", {
           origin: normalizedOrigin,
           npcId: npc?.id || "",
@@ -4020,6 +4122,7 @@ class AppRuntime {
       if (result?.ok !== true) {
         throw new Error(`step callback failed: step=${i + 1}/${steps.length} type=${step?.type || "unknown"}`);
       }
+      this._throwIfRuntimeStopped(runToken);
       if (result?.moveConsumed) runtimeState.moveConsumed = true;
       this._trace("fvtt.plan.step.done", {
         origin: normalizedOrigin,
@@ -4036,6 +4139,7 @@ class AppRuntime {
       });
       if (i + 1 < steps.length) {
         await new Promise((resolve) => setTimeout(resolve, 200));
+        this._throwIfRuntimeStopped(runToken);
       }
     }
     this._trace("fvtt.plan.done", {
@@ -4047,7 +4151,8 @@ class AppRuntime {
     });
   }
 
-  async _handleNpcDiscordMessage({ config, npc, message, text }) {
+  async _handleNpcDiscordMessage({ config, npc, message, text, runToken = 0 }) {
+    this._throwIfRuntimeStopped(runToken);
     const npcName = String(npc?.displayName || npc?.id || "NPC");
     this.log.info("discord", `inbound -> ${npcName}: ${compact(text, 180)}`);
     this._trace("discord.handle.start", {
@@ -4069,6 +4174,7 @@ class AppRuntime {
 
     if (this.fvtt && config?.foundry?.enabled) {
       const connected = await this.fvtt.ensureConnected();
+      this._throwIfRuntimeStopped(runToken);
       fvttReady = Boolean(connected.ok);
       this._trace("fvtt.ensureConnected", {
         origin: "discord",
@@ -4080,8 +4186,10 @@ class AppRuntime {
         // Pull context.
         try {
           const chat = await this.fvtt.getRecentChat(10);
+          this._throwIfRuntimeStopped(runToken);
           if (chat?.ok) fvttChatContext = chat.messages || [];
         } catch (e) {
+          if (this._isRuntimeAbortError(e)) return;
           this.log.warn("fvtt", `chat context failed: ${e?.message || e}`);
           fvttReady = false;
         }
@@ -4089,8 +4197,9 @@ class AppRuntime {
 
       if (fvttReady) {
         try {
-          fvttSceneContext = await this._getTacticalSceneContext(npc, 60);
+          fvttSceneContext = await this._getTacticalSceneContext(npc, 60, runToken);
         } catch (e) {
+          if (this._isRuntimeAbortError(e)) return;
           this.log.warn("fvtt", `scene context failed: ${e?.message || e}`);
           fvttReady = false;
         }
@@ -4098,8 +4207,9 @@ class AppRuntime {
 
       if (fvttReady) {
         try {
-          fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet());
+          fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet(), { runToken });
         } catch (e) {
+          if (this._isRuntimeAbortError(e)) return;
           this.log.warn("fvtt", `actor sheet failed: ${e?.message || e}`);
         }
       }
@@ -4107,6 +4217,7 @@ class AppRuntime {
       if (fvttReady) {
         try {
           const sceneTokens = await this.fvtt.listSceneTokens();
+          this._throwIfRuntimeStopped(runToken);
           if (sceneTokens?.ok) {
             mentionedSceneTokens = collectMentionedSceneTokens({
               text,
@@ -4115,6 +4226,7 @@ class AppRuntime {
             });
           }
         } catch (e) {
+          if (this._isRuntimeAbortError(e)) return;
           this.log.warn("fvtt", `scene token list failed: ${e?.message || e}`);
         }
       }
@@ -4160,6 +4272,7 @@ class AppRuntime {
     }
 
     const personaText = await loadNpcPromptDocs({ config, npc });
+    this._throwIfRuntimeStopped(runToken);
 
     let replyText = "";
     let intent = { type: "none", args: {} };
@@ -4190,6 +4303,7 @@ class AppRuntime {
           messageId: String(message?.id || ""),
         },
       });
+      this._throwIfRuntimeStopped(runToken);
       const normalized = normalizeIntent(completion.parsed);
       const actionTag = extractFvttActionTags(normalized.replyText);
       replyText = actionTag.hadTag ? actionTag.visibleText || "(...)" : normalized.replyText || "(...)";
@@ -4239,6 +4353,7 @@ class AppRuntime {
       });
       this.log.info("llm", `intent(discord): type=${intent.type} args=${compact(JSON.stringify(intent.args), 220)}`);
     } catch (e) {
+      if (this._isRuntimeAbortError(e)) return;
       this.log.error("llm", `LLM failed: ${e?.message || e}`);
       this._maybeLogOpenAiScopeHint(e, config);
       this._trace("llm.error.discord", { npcId: npc?.id || "", messageId: String(message?.id || ""), error: e });
@@ -4250,19 +4365,21 @@ class AppRuntime {
     let actionNote = "";
     if (fvttReady && this.fvtt && intent?.type && intent.type !== "none") {
       try {
+        this._throwIfRuntimeStopped(runToken);
         this._trace("fvtt.intent.execute.start", {
           origin: "discord",
           npcId: npc?.id || "",
           intent,
           strictExecution,
         });
-        await this._executeIntentPlan({ config, npc, intent, origin: "discord", strict: strictExecution });
+        await this._executeIntentPlan({ config, npc, intent, origin: "discord", strict: strictExecution, runToken });
         this._trace("fvtt.intent.execute.done", {
           origin: "discord",
           npcId: npc?.id || "",
           intentType: intent?.type || "none",
         });
       } catch (e) {
+        if (this._isRuntimeAbortError(e)) return;
         const displayError = this._formatFvttExecutionError(e);
         actionNote = `\n(FVTT 동작 실행 실패: ${displayError})`;
         this._trace("fvtt.intent.execute.error", {
@@ -4277,7 +4394,8 @@ class AppRuntime {
     // Speak in FVTT (best effort) if online
     if (fvttReady && this.fvtt) {
       try {
-        await this._withNpcActor(npc, () => this.fvtt.speakAsActor(replyText));
+        this._throwIfRuntimeStopped(runToken);
+        await this._withNpcActor(npc, () => this.fvtt.speakAsActor(replyText), { runToken });
         this._trace("fvtt.speak.outbound", {
           origin: "discord",
           npcId: npc?.id || "",
@@ -4285,12 +4403,14 @@ class AppRuntime {
           text: replyText,
         });
       } catch (e) {
+        if (this._isRuntimeAbortError(e)) return;
         this.log.warn("fvtt", `speak failed: ${e?.message || e}`);
         this._trace("fvtt.speak.error", { origin: "discord", npcId: npc?.id || "", error: e });
       }
     }
 
     try {
+      this._throwIfRuntimeStopped(runToken);
       const sent = await message.reply(replyText + actionNote);
       this._trace("discord.outbound.reply", {
         npcId: npc?.id || "",
@@ -4300,6 +4420,7 @@ class AppRuntime {
         text: String(replyText + actionNote),
       });
     } catch (e) {
+      if (this._isRuntimeAbortError(e)) return;
       this._trace("discord.outbound.reply.error", {
         npcId: npc?.id || "",
         requestMessageId: String(message?.id || ""),
@@ -4308,9 +4429,9 @@ class AppRuntime {
     }
   }
 
-  async _pickAutoTargetTokenRef(npc) {
+  async _pickAutoTargetTokenRef(npc, runToken = 0) {
     try {
-      const scene = await this._getTacticalSceneContext(npc, 30);
+      const scene = await this._getTacticalSceneContext(npc, 30, runToken);
       if (!scene?.ok) return null;
 
       const selected = pickAutoTargetFromSceneContext(scene, { preferSelected: true });
@@ -4320,17 +4441,19 @@ class AppRuntime {
     }
   }
 
-  async _getTacticalSceneContext(npc, maxTokens = 40) {
-    const scene = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(maxTokens));
+  async _getTacticalSceneContext(npc, maxTokens = 40, runToken = 0) {
+    this._throwIfRuntimeStopped(runToken);
+    const scene = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(maxTokens), { runToken });
+    this._throwIfRuntimeStopped(runToken);
     if (!scene?.ok) return scene;
     return analyzeSceneTactics(scene, { selfTokenId: String(scene?.actorToken?.id || "").trim() });
   }
 
-  async _deriveMoveFromTarget({ npc, targetTokenRef }) {
+  async _deriveMoveFromTarget({ npc, targetTokenRef, runToken = 0 }) {
     const ref = String(targetTokenRef || "").trim();
     if (!ref) return null;
     try {
-      const scene = await this._getTacticalSceneContext(npc, 40);
+      const scene = await this._getTacticalSceneContext(npc, 40, runToken);
       if (!scene?.ok) return null;
       const derived = derivePathMoveFromSceneContext(scene, ref);
       if (!derived) return null;
@@ -4340,7 +4463,8 @@ class AppRuntime {
     }
   }
 
-  async _executeNpcImageIntent({ config, npc, args, strict = false }) {
+  async _executeNpcImageIntent({ config, npc, args, strict = false, runToken = 0 }) {
+    this._throwIfRuntimeStopped(runToken);
     const state = normalizeNpcImageGenerationState({ config, npc });
     const npcName = String(npc?.displayName || npc?.id || "NPC");
     if (!state.enabled) {
@@ -4366,10 +4490,11 @@ class AppRuntime {
     let imageCombatState = null;
     if (this.fvtt) {
       try {
-        imageActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet());
-        imageSceneContext = await this._getTacticalSceneContext(npc, 30);
-        imageCombatState = await this._withNpcActor(npc, () => this.fvtt.getActorCombatState());
-      } catch {
+        imageActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet(), { runToken });
+        imageSceneContext = await this._getTacticalSceneContext(npc, 30, runToken);
+        imageCombatState = await this._withNpcActor(npc, () => this.fvtt.getActorCombatState(), { runToken });
+      } catch (e) {
+        if (this._isRuntimeAbortError(e)) throw e;
         // Ignore context fetch failures and continue with provided prompt.
       }
     }
@@ -4449,7 +4574,8 @@ class AppRuntime {
       `</div>`,
     ].join("");
 
-    const speak = await this._withNpcActor(npc, () => this.fvtt.speakAsActor(html));
+    this._throwIfRuntimeStopped(runToken);
+    const speak = await this._withNpcActor(npc, () => this.fvtt.speakAsActor(html), { runToken });
     if (!speak?.ok) {
       throw new Error(String(speak?.error || "failed to post image to FVTT chat"));
     }
@@ -4474,7 +4600,8 @@ class AppRuntime {
     };
   }
 
-  async _executeNpcIntent({ config, npc, intent, strict = false, execution = {} }) {
+  async _executeNpcIntent({ config, npc, intent, strict = false, execution = {}, runToken = 0 }) {
+    this._throwIfRuntimeStopped(runToken);
     const type = String(intent?.type || "none").toLowerCase();
     const args = isPlainObject(intent?.args) ? intent.args : {};
     const allowAutoApproach = execution?.allowAutoApproach !== false;
@@ -4494,7 +4621,7 @@ class AppRuntime {
     if (type === "say") {
       const text = String(args.text || "").trim();
       if (!text) return { ok: true, moveConsumed: false, skipped: true };
-      const result = await this._withNpcActor(npc, () => this.fvtt.speakAsActor(text));
+      const result = await this._withNpcActor(npc, () => this.fvtt.speakAsActor(text), { runToken });
       this._trace("fvtt.say.response", { npcId: npc?.id || "", text, result });
       if (!result?.ok) {
         throw new Error(String(result?.error || "say failed"));
@@ -4506,13 +4633,13 @@ class AppRuntime {
     if (type === "inspect") {
       const what = String(args.what || "").toLowerCase();
       if (what === "sheet") {
-        const sheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet());
+        const sheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet(), { runToken });
         this.log.info("fvtt", `sheet ok=${sheet?.ok}`);
         this._trace("fvtt.inspect.result", { npcId: npc?.id || "", what, result: sheet });
         return { ok: true, moveConsumed: false };
       }
       if (what === "context") {
-        const ctx = await this._getTacticalSceneContext(npc, 20);
+        const ctx = await this._getTacticalSceneContext(npc, 20, runToken);
         this.log.info("fvtt", `context ok=${ctx?.ok}`);
         this._trace("fvtt.inspect.result", { npcId: npc?.id || "", what, result: ctx });
         return { ok: true, moveConsumed: false };
@@ -4527,14 +4654,14 @@ class AppRuntime {
     }
 
     if (type === "image") {
-      await this._executeNpcImageIntent({ config, npc, args, strict });
+      await this._executeNpcImageIntent({ config, npc, args, strict, runToken });
       return { ok: true, moveConsumed: false };
     }
 
     if (type === "targetset") {
       const tokenRef = String(args.tokenRef || args.targetTokenRef || args.targetRef || "").trim();
       if (!tokenRef) return { ok: true, moveConsumed: false, skipped: true };
-      const result = await this._withNpcActor(npc, () => this.fvtt.setActorTarget(tokenRef));
+      const result = await this._withNpcActor(npc, () => this.fvtt.setActorTarget(tokenRef), { runToken });
       this._trace("fvtt.targetset.response", { npcId: npc?.id || "", tokenRef, result });
       if (!result?.ok) {
         throw new Error(String(result?.error || "targetset failed"));
@@ -4544,7 +4671,7 @@ class AppRuntime {
     }
 
     if (type === "targetclear") {
-      const result = await this._withNpcActor(npc, () => this.fvtt.clearActorTargets());
+      const result = await this._withNpcActor(npc, () => this.fvtt.clearActorTargets(), { runToken });
       this._trace("fvtt.targetclear.response", { npcId: npc?.id || "", result });
       if (!result?.ok) {
         throw new Error(String(result?.error || "targetclear failed"));
@@ -4556,7 +4683,7 @@ class AppRuntime {
     if (type === "move") {
       let targetTokenRef = String(args.targetTokenRef || "").trim() || null;
       if (!strict && !targetTokenRef) {
-        targetTokenRef = await this._pickAutoTargetTokenRef(npc);
+        targetTokenRef = await this._pickAutoTargetTokenRef(npc, runToken);
       }
       let direction = String(args.direction || "").toUpperCase().trim();
       let amount = Number(args.amount || 1);
@@ -4565,7 +4692,7 @@ class AppRuntime {
       let pathSegments = Array.isArray(args.pathSegments) && args.pathSegments.length ? args.pathSegments : null;
 
       if (!direction && targetTokenRef) {
-        const derived = await this._deriveMoveFromTarget({ npc, targetTokenRef });
+        const derived = await this._deriveMoveFromTarget({ npc, targetTokenRef, runToken });
         if (derived?.direction) {
           direction = String(derived.direction).toUpperCase();
           if (!Number.isFinite(amount) || amount <= 0) {
@@ -4585,9 +4712,9 @@ class AppRuntime {
       }
 
       if (!strict && !direction) {
-        const nearestTarget = await this._pickAutoTargetTokenRef(npc);
+        const nearestTarget = await this._pickAutoTargetTokenRef(npc, runToken);
         if (nearestTarget && nearestTarget !== targetTokenRef) {
-          const derived = await this._deriveMoveFromTarget({ npc, targetTokenRef: nearestTarget });
+          const derived = await this._deriveMoveFromTarget({ npc, targetTokenRef: nearestTarget, runToken });
           if (derived?.direction) {
             direction = String(derived.direction).toUpperCase();
             if (!Number.isFinite(amount) || amount <= 0) {
@@ -4624,8 +4751,10 @@ class AppRuntime {
         targetTokenRef: targetTokenRef || "",
         move,
       });
-      const result = await this._withNpcActor(npc, () =>
-        this.fvtt.moveToken(move, config?.npc?.difficultTerrainMultiplier || 2)
+      const result = await this._withNpcActor(
+        npc,
+        () => this.fvtt.moveToken(move, config?.npc?.difficultTerrainMultiplier || 2),
+        { runToken }
       );
       this._trace("fvtt.move.response", { npcId: npc?.id || "", result });
       if (!result?.ok) {
@@ -4656,8 +4785,10 @@ class AppRuntime {
         raw: "llm-token-move",
       };
       this._trace("fvtt.tokenmove.request", { npcId: npc?.id || "", tokenRef, move });
-      const result = await this._withNpcActor(npc, () =>
-        this.fvtt.moveTokenByRef(tokenRef, move, config?.npc?.difficultTerrainMultiplier || 2)
+      const result = await this._withNpcActor(
+        npc,
+        () => this.fvtt.moveTokenByRef(tokenRef, move, config?.npc?.difficultTerrainMultiplier || 2),
+        { runToken }
       );
       this._trace("fvtt.tokenmove.response", { npcId: npc?.id || "", result });
       if (!result?.ok) {
@@ -4672,7 +4803,7 @@ class AppRuntime {
       let actionName = String(args.actionName || "").trim();
       let targetTokenRef = String(args.targetTokenRef || "").trim() || null;
       if (!strict && !targetTokenRef) {
-        targetTokenRef = await this._pickAutoTargetTokenRef(npc);
+        targetTokenRef = await this._pickAutoTargetTokenRef(npc, runToken);
       }
       if (!actionName) {
         if (strict) throw new Error("action failed: actionName is missing");
@@ -4684,10 +4815,13 @@ class AppRuntime {
         targetTokenRef: targetTokenRef || "",
         allowAutoApproach,
       });
-      const result = await this._withNpcActor(npc, () =>
-        allowAutoApproach
-          ? this.fvtt.useActorActionSmart(actionName, targetTokenRef)
-          : this.fvtt.useActorAction(actionName, targetTokenRef)
+      const result = await this._withNpcActor(
+        npc,
+        () =>
+          allowAutoApproach
+            ? this.fvtt.useActorActionSmart(actionName, targetTokenRef)
+            : this.fvtt.useActorAction(actionName, targetTokenRef),
+        { runToken }
       );
       this._trace("fvtt.action.response", { npcId: npc?.id || "", result });
       let finalResult = result;
@@ -4733,7 +4867,9 @@ class AppRuntime {
             targetTokenRef: targetTokenRef || "",
             aoe,
           });
-          const retry = await this._withNpcActor(npc, () => this.fvtt.useActorActionAoe(actionName, aoe));
+          const retry = await this._withNpcActor(npc, () => this.fvtt.useActorActionAoe(actionName, aoe), {
+            runToken,
+          });
           this._trace("fvtt.action.retry_aoe.response", { npcId: npc?.id || "", result: retry });
           if (retry?.ok) {
             finalResult = retry;
@@ -4774,10 +4910,13 @@ class AppRuntime {
         targetTokenRef: targetTokenRef || "",
         allowAutoApproach,
       });
-      const result = await this._withNpcActor(npc, () =>
-        allowAutoApproach
-          ? this.fvtt.useTokenActionSmart(tokenRef, actionName, targetTokenRef)
-          : this.fvtt.useTokenAction(tokenRef, actionName, targetTokenRef)
+      const result = await this._withNpcActor(
+        npc,
+        () =>
+          allowAutoApproach
+            ? this.fvtt.useTokenActionSmart(tokenRef, actionName, targetTokenRef)
+            : this.fvtt.useTokenAction(tokenRef, actionName, targetTokenRef),
+        { runToken }
       );
       this._trace("fvtt.tokenaction.response", { npcId: npc?.id || "", result });
       if (!result?.ok) {
@@ -4806,7 +4945,7 @@ class AppRuntime {
       }
       let centerTokenRef = String(args.centerTokenRef || "").trim() || null;
       if (!strict && !centerTokenRef) {
-        centerTokenRef = await this._pickAutoTargetTokenRef(npc);
+        centerTokenRef = await this._pickAutoTargetTokenRef(npc, runToken);
       }
       const aoe = {
         shape: String(args.shape || "circle"),
@@ -4825,7 +4964,7 @@ class AppRuntime {
         aoe.centerY = Number(args.centerY);
       }
       this._trace("fvtt.aoe.request", { npcId: npc?.id || "", actionName, aoe });
-      const result = await this._withNpcActor(npc, () => this.fvtt.useActorActionAoe(actionName, aoe));
+      const result = await this._withNpcActor(npc, () => this.fvtt.useActorActionAoe(actionName, aoe), { runToken });
       this._trace("fvtt.aoe.response", { npcId: npc?.id || "", result });
       if (!result?.ok) {
         const detail = String(result?.detail || "").trim();
