@@ -1,0 +1,70 @@
+﻿name: Bug report
+description: Report a reproducible problem in FVTT AI NPC Runtime
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please include enough detail to reproduce the issue.
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: foundry_version
+    attributes:
+      label: Foundry VTT version
+      placeholder: 13.x
+  - type: input
+    id: system_version
+    attributes:
+      label: Game system and version
+      placeholder: dnd5e 4.x
+  - type: textarea
+    id: modules
+    attributes:
+      label: Related Foundry modules
+      description: Include modules like midi-qol or any combat automation modules.
+      placeholder: midi-qol, lib-wrapper, ...
+  - type: dropdown
+    id: provider
+    attributes:
+      label: LLM provider
+      options:
+        - codex-cli
+        - openai-api-key
+        - openai-oauth
+        - other
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start the app
+        2. Open combat
+        3. Wait for NPC turn
+        4. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: Paste trace snippets or screenshots if available.

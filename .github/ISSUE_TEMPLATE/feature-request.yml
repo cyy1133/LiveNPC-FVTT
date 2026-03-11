@@ -1,0 +1,41 @@
+﻿name: Feature request
+description: Suggest an improvement or new capability
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the user problem first, then the feature you want.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      placeholder: Running many NPCs in combat still requires too much manual targeting.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      placeholder: Add a Foundry companion module for tighter in-app integration.
+    validations:
+      required: true
+  - type: textarea
+    id: scenario
+    attributes:
+      label: Example use case
+      placeholder: In a long campaign with 6+ NPCs, ...
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Combat automation
+        - Discord dialogue
+        - Image generation
+        - UI / setup
+        - Foundry integration
+        - Documentation
+        - Other
