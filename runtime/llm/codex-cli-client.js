@@ -1,3 +1,4 @@
+const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
@@ -6,9 +7,45 @@ const { promisify } = require("node:util");
 
 const execFileAsync = promisify(execFile);
 
+function findBundledCodexBinSync() {
+  if (process.platform !== "win32") return "";
+
+  const appDataCodex = path.join(process.env.APPDATA || "", "npm", "codex.cmd");
+  if (appDataCodex && fsSync.existsSync(appDataCodex)) return appDataCodex;
+
+  const extRoot = path.join(process.env.USERPROFILE || "", ".vscode", "extensions");
+  if (!extRoot || !fsSync.existsSync(extRoot)) return "";
+
+  try {
+    const dirs = fsSync
+      .readdirSync(extRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^openai\.chatgpt-/i.test(entry.name))
+      .map((entry) => entry.name)
+      .sort()
+      .reverse();
+
+    for (const dirName of dirs) {
+      const candidate = path.join(extRoot, dirName, "bin", "windows-x86_64", "codex.exe");
+      if (fsSync.existsSync(candidate)) return candidate;
+    }
+  } catch {
+    return "";
+  }
+
+  return "";
+}
+
 function normalizeCodexBin(rawBin) {
   const bin = String(rawBin || "").trim();
-  if (bin) return bin;
+  if (bin) {
+    const looksLikePath =
+      path.isAbsolute(bin) ||
+      /^[.]{1,2}[\\/]/.test(bin) ||
+      /[\\/]/.test(bin);
+    if (!looksLikePath || fsSync.existsSync(bin)) return bin;
+  }
+  const bundled = findBundledCodexBinSync();
+  if (bundled) return bundled;
   if (process.platform === "win32") return "codex.exe";
   return "codex";
 }

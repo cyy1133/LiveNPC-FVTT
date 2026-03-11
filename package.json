@@ -4,6 +4,15 @@
   "private": true,
   "type": "commonjs",
   "description": "Standalone desktop runtime to connect FVTT <-> Discord <-> LLM for multi-NPC autonomy.",
+  "author": "cyy1133",
+  "homepage": "https://github.com/cyy1133/LiveNPC-FVTT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cyy1133/LiveNPC-FVTT.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cyy1133/LiveNPC-FVTT/issues"
+  },
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
@@ -31,6 +40,10 @@
       "runtime/**",
       "Spec.md",
       "README.md",
+      "QUICKSTART_KR.md",
+      "RELEASE_GUIDE_KR.md",
+      "CHANGELOG.md",
+      "docs/**",
       "config.example.json",
       "package.json"
     ],

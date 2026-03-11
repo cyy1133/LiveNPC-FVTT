@@ -1,136 +1,156 @@
-﻿# FVTT AI NPC Runtime 빠른 시작 (Windows)
+﻿# FVTT AI NPC Runtime 5분 시작 가이드
 
-## 1) 설치
+이 문서는 소스 빌드 없이 `Windows 설치형 EXE`만 받아 실행하는 사용자를 기준으로 작성되었습니다.
 
-1. `fvtt-ai-runtime/dist/FVTT AI NPC Runtime Setup 0.1.0.exe` 실행
-2. 설치 후 시작 메뉴에서 `FVTT AI NPC Runtime` 실행
+## 이 문서가 필요한 사람
 
-## 2) 추천 LLM 방식 (구독형)
+- GitHub 저장소를 처음 열어본 사용자
+- EXE를 받아 바로 실행하고 싶은 사용자
+- FVTT, Discord, Codex 연결 순서를 짧게 확인하고 싶은 사용자
 
-기본 추천은 `Codex CLI (ChatGPT subscription)` 입니다.
+## 먼저 준비할 것
 
-- API Key 없이 사용 가능
-- OpenClaw 없이 독립 실행 가능
-- Codex 로그인만 완료하면 진단/실행 가능
+실행 전에 아래 정보만 준비하면 됩니다.
 
-## 3) 최초 설정 순서
+1. `Foundry VTT`
+   - 접속 URL
+   - 계정 ID
+   - 비밀번호
+2. `Discord`
+   - Bot Token
+   - 사용할 채널 이름
+3. `LLM`
+   - 권장: `Codex CLI (ChatGPT subscription)`
+4. `선택 사항`
+   - Stable Diffusion WebUI URL
+   - NPC용 Markdown 문서
 
-1. `Quick Setup` 입력
-- Discord Bot Token
-- Discord Channel (기본 `aibot`)
-- FVTT URL / Username / Password
-- 필요 시 NPC Actor 이름
+## 1. 설치
 
-2. `LLM Provider = Codex CLI (ChatGPT subscription)` 선택
-- Model: 기본 `gpt-5.3-codex`
-- `Codex CLI Path`는 보통 비워도 됨 (`codex.exe`가 PATH에 있으면 자동 탐지)
+1. 배포된 설치 파일 `FVTT AI NPC Runtime Setup 0.1.0.exe`를 실행합니다.
+2. 설치가 끝나면 시작 메뉴에서 `FVTT AI NPC Runtime`을 실행합니다.
 
-3. `Install Prerequisites` 버튼 클릭 (최초 1회 권장)
-- Codex가 없으면 자동 설치 시도
-- npm/Node가 없으면 Windows에서 `winget`으로 Node LTS 설치 시도
-- 설치가 끝나면 `codex` 경로를 자동 저장
+## 2. 메인 화면에서 할 일
 
-4. `Codex Login` 버튼 클릭
-- 터미널 창이 열림
-- 해당 창에서 로그인 완료
+![메인 대시보드](docs/images/readme-dashboard.png)
 
-5. `Diagnostics` 실행
-- `discord`, `fvtt`, `llm`가 모두 `ok`인지 확인
+처음 실행 후에는 아래 버튼만 기억하면 됩니다.
 
-6. `Start` 실행
+- `Install Prerequisites`: Codex / Node 등 선행 조건 설치
+- `Codex Login`: Codex 로그인
+- `Diagnostics`: Discord / FVTT / LLM 연결 점검
+- `Start`: 실제 런타임 시작
 
-## 3-1) 기본 세계관/NPC/전투 패턴 MD
+## 3. Quick Setup 입력
 
-- 첫 실행 시 설정 파일 폴더 아래에 `persona-defaults`가 자동 생성됩니다.
-- 기본 파일:
-  - `world.md` (공용 세계관)
-  - `npc.md` (기본 성격/대화)
-  - `battlePattern.md` (기본 전투 패턴)
-- 기본 NPC `diana`는 위 3개 파일을 자동 연결해서 시작합니다.
-- UI에서 파일 경로를 바꾸거나 `Edit`로 바로 수정/저장할 수 있습니다.
+`기본 설정 > Runtime` 탭에서 아래 값을 입력합니다.
 
-## 4) 사용 방법
+- `Discord Bot Token`
+- `Discord Channel`
+- `FVTT URL`
+- `FVTT Username`
+- `FVTT Password`
+- `LLM Provider`
 
-- Discord의 `#aibot` 채널에서 봇 멘션 후 대화
-- 멀티 NPC일 때는 이름 포함 호출 권장
-- 설정 화면은 `기본 설정` / `NPC 설정` 탭으로 분리되어 있습니다.
-- `기본 설정 > Image` 탭에서 SD WebUI URL 및 이미지 크기(px)를 설정할 수 있습니다.
-- NPC 패널의 `Add NPC` 버튼으로 다중 NPC를 추가할 수 있습니다.
-- 추가된 각 NPC 카드에는 `Delete NPC` 버튼이 있으며, 삭제 시 `yes` 입력 확인이 필요합니다.
-- NPC 패널에서 `Save NPC` / `Reload NPC`로 NPC 설정만 별도로 저장/다시불러오기 할 수 있습니다.
-- 각 NPC의 `React Distance <= (ft)`로 반응 거리 상한을 설정할 수 있습니다.
-  - 소스 토큰 거리가 이 값보다 멀면 해당 NPC는 LLM 호출을 생략합니다.
-  - 소스 토큰(발화자)을 찾지 못해도 해당 NPC는 반응을 생략합니다.
-  - `0`이면 거리 게이트를 끕니다.
-- 각 NPC 카드의 `Image Prompt Settings`(접기/펼치기)에서:
-  - 이미지 생성 허용 on/off
-  - NPC 기본 이미지 프롬프트(default prompt)
-    를 개별 설정할 수 있습니다.
-- FVTT 인바운드는 런타임 시작 시점 이후 메시지만 반응합니다.
-- 전투 중에는 `combatAutoTurn=true`일 때 NPC 턴을 자동 폴링합니다.
-  - 기본 흐름: 턴 시작 대사 -> 행동 실행 -> 턴 넘기기
-  - 설정 경로: `config.json > foundry > combatAutoTurn`
-- 전투가 활성화되고 해당 NPC가 전투 순서에 포함되어 있으면, 자신의 턴에 자동으로 행동을 시도합니다.
-  - 기본값: `foundry.combatAutoTurn = true`
-  - 끄려면 설정 파일에서 `foundry.combatAutoTurn`을 `false`로 설정
+권장값:
 
-## 4-2) 소스 원클릭 빌드
+- `LLM Provider = Codex CLI (ChatGPT subscription)`
+- 모델은 기본값 유지
+- 이미지 생성이 필요 없으면 Image 탭은 비워도 됩니다
 
-- 루트 폴더에서 `build-oneclick.bat` 실행
-- 내부적으로 `npm run dist`를 수행하여 설치 파일(`dist/*.exe`)을 생성합니다.
+## 4. 필수 버튼 순서
 
-## 4-3) CLI 설정 파일 경로 (EXE와 동일)
+처음 한 번은 아래 순서대로 진행하는 것이 가장 안전합니다.
 
-- 현재 버전부터 CLI 기본 설정 경로도 EXE와 동일합니다.
-  - Windows: `%APPDATA%\\fvtt-ai-runtime\\config.json`
-- 따라서 아래처럼 `--config` 없이 실행해도 EXE에서 저장한 설정을 그대로 사용합니다.
-  - `node runtime/cli.js diagnose`
-  - `node runtime/cli.js run`
-- 다른 설정 파일을 쓰고 싶을 때만 `--config <path>`를 지정하면 됩니다.
+1. `Install Prerequisites`
+2. `Codex Login`
+3. `Save Quick Setup`
+4. `Diagnostics`
+5. `Start`
 
-## 4-4) CLI 켜기/끄기 (배치파일)
+`Diagnostics`에서 최소한 아래 3개가 `ok`여야 합니다.
 
-- 루트 폴더에서 아래 배치파일을 사용하면 됩니다.
-  - 시작: `cli-start.bat`
-  - 중지: `cli-stop.bat`
-  - 상태 확인: `cli-status.bat`
-  - 재시작: `cli-restart.bat`
-- 모두 `%APPDATA%\\fvtt-ai-runtime\\config.json`을 기준으로 동작합니다.
+- `discord`
+- `fvtt`
+- `llm`
 
-## 4-1) 전체 왕복 로그 보기 (Discord <-> LLM <-> FVTT)
+## 5. NPC 설정
 
-- Quick Setup에서 `Enable full trace log` 체크
-- 실행 후 Log 패널에 `trace: full trace enabled: ...` 경로가 표시됨
-- 해당 폴더에 `runtime-trace-YYYYMMDD-HHMMSS.ndjson` 파일 생성
-- 이 파일에 다음이 순서대로 기록됨
-  - Discord 인바운드/아웃바운드 원문
-  - LLM 프롬프트/응답(JSON 파싱 전후)
-  - FVTT 액션 요청/응답(이동, 타겟, 액션, AOE, 채팅)
+![NPC 설정 패널](docs/images/readme-npc-panel.png)
 
-참고:
-- 로그가 매우 커질 수 있습니다.
-- 민감정보 키 이름(`token`, `password`, `apiKey` 등)은 자동 마스킹됩니다.
+`NPC 설정` 탭에서는 NPC별 설정을 관리합니다.
 
-## 5) 자주 발생하는 문제
+- `Add NPC`로 NPC 추가
+- 카드 헤더에서 이름과 토큰 썸네일 확인
+- 클릭하면 카드가 펼쳐져 상세 설정 편집
+- `Foundry Actor` 연결
+- `Soul` / `Battle Rule` / `World Lore` Markdown 연결
+- `React Distance` 설정
+- `Save NPC`로 개별 저장
 
-### Codex 로그인 상태가 Not logged in
-- `Codex Login` 다시 클릭 후 터미널에서 로그인 완료
-- 완료 후 `Diagnostics` 재실행
+기본적으로 카드 상태는 접혀 있고, 펼침 상태는 저장됩니다.
 
-### Codex 설치 실패
-- 앱의 `Install Prerequisites`를 다시 실행
-- 또는 터미널에서 수동 설치:
-  - `npm install -g @openai/codex`
+## 6. 처음 성공 기준
 
-### OpenAI OAuth에서 401 권한 오류
-- 조직/프로젝트 권한 부족 또는 scope 제한 키 문제
-- 이 경우 `Codex CLI` 방식 사용을 권장
+아래까지 되면 기본 연결은 정상입니다.
 
-### Discord 응답 없음
-- 채널명이 정확히 `aibot`인지 확인 (대소문자 무시)
-- `requireMention=true`이면 반드시 멘션 필요
+1. `Start` 후 로그에 오류가 없음
+2. Discord 채널에서 NPC 호출 시 응답
+3. FVTT에서 NPC 토큰 썸네일이 보임
+4. 전투 시작 후 NPC 턴에 자동 행동
+5. 행동 종료 후 턴이 자동으로 넘어감
 
-### FVTT 연결 실패
-- FVTT 서버 실행 여부 확인
-- URL/계정/비밀번호 재확인
-- 해당 Actor/Token에 Owner 권한이 있는 계정인지 확인
+## 7. 전투에서 자동으로 보는 정보
+
+이 런타임은 전투 중 아래 요소를 읽고 행동을 제한합니다.
+
+- 이동력
+- 액션 / 보조 행동
+- 주문 슬롯
+- 현재 HP
+- 집중 여부
+- 상태이상 / 효과
+- 전투 참여 여부
+- 시야, 벽, 경로 가능 여부
+- dead / HP 0 / 사망 유사 상태
+
+예를 들어 `소검 공격`과 `잔혹한 모욕`이 둘 다 액션이면, 일반적인 상황에서는 한 턴에 둘 다 쓰지 않도록 판단합니다.
+
+## 8. 자주 막히는 지점
+
+### Codex Login이 실패할 때
+
+- `Install Prerequisites`를 먼저 실행합니다.
+- 로그인 창이 열리면 그 창에서 직접 로그인을 마칩니다.
+- 완료 후 다시 `Diagnostics`를 돌립니다.
+
+### FVTT 연결이 실패할 때
+
+- URL이 정확한지 확인합니다.
+- 해당 계정이 Actor/Token에 `Owner` 권한이 있는지 확인합니다.
+- Scene에 실제 토큰이 배치되어 있는지 확인합니다.
+
+### NPC 토큰 썸네일이 안 뜰 때
+
+- `Start` 후 `Refresh Tokens`를 눌러 다시 동기화합니다.
+- Actor 연결이 정확한지 확인합니다.
+
+### 전투 행동이 예상과 다를 때
+
+- NPC의 `Battle Rule` 문서를 먼저 확인합니다.
+- `Enable full trace log`를 켜고 실제 입력/출력을 점검합니다.
+
+## 9. 설정 파일 위치
+
+기본 설정 파일 경로:
+
+- `%APPDATA%\\fvtt-ai-runtime\\config.json`
+
+이 파일에는 Discord / FVTT / LLM 설정이 저장됩니다.
+
+## 10. 다음에 읽을 문서
+
+- 제품 소개: `README.md`
+- 배포 준비: `RELEASE_GUIDE_KR.md`
+- 변경 내역: `CHANGELOG.md`
+- 내부 설계 메모: `Spec.md`

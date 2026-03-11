@@ -198,18 +198,18 @@ async function findCodexPath(preferred) {
   const preferredPath = String(preferred || "").trim();
   if (preferredPath && (await fileExists(preferredPath))) return preferredPath;
 
-  const pathHits = isWin() ? ["codex.exe", "codex.cmd", "codex"] : ["codex"];
-  for (const name of pathHits) {
-    const hit = await findOnPath(name);
-    if (hit) return hit;
-  }
-
   if (isWin()) {
     const appDataCodex = path.join(process.env.APPDATA || "", "npm", "codex.cmd");
     if (await fileExists(appDataCodex)) return appDataCodex;
 
     const vscodeCodex = await findCodexFromVscodeExtension();
     if (vscodeCodex) return vscodeCodex;
+  }
+
+  const pathHits = isWin() ? ["codex.exe", "codex.cmd", "codex"] : ["codex"];
+  for (const name of pathHits) {
+    const hit = await findOnPath(name);
+    if (hit) return hit;
   }
 
   return null;
@@ -340,4 +340,3 @@ async function ensureCodexPrerequisites({ config, onLog } = {}) {
 module.exports = {
   ensureCodexPrerequisites,
 };
-
