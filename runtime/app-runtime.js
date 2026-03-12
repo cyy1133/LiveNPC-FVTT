@@ -616,6 +616,55 @@ function buildDirectorFollowUpInboundText({
   ].join("\n");
 }
 
+function pickAmbientAudienceFromSceneContext(sceneContext, maxDistanceFt = 30) {
+  const selfTokenId = ensureString(sceneContext?.actorToken?.id || "");
+  const limit = Math.max(0, Number(maxDistanceFt) || 0);
+  const candidates = ensureArray(sceneContext?.tokens)
+    .map((token) => ({
+      id: ensureString(token?.id || ""),
+      name: ensureString(token?.name || ""),
+      actorName: ensureString(token?.actorName || ""),
+      hidden: token?.hidden === true,
+      defeated: token?.defeated === true,
+      isDeadLike: token?.isDeadLike === true,
+      disposition: Number(token?.disposition),
+      orthDistanceFt: Number(token?.orthDistanceFt),
+      distanceFt: Number(token?.distanceFt),
+    }))
+    .filter((token) => token.id && token.id !== selfTokenId)
+    .filter((token) => !token.hidden && !token.defeated && !token.isDeadLike)
+    .filter((token) => !Number.isFinite(token.disposition) || token.disposition >= 0)
+    .filter((token) => {
+      const distance = Number.isFinite(token.orthDistanceFt) ? token.orthDistanceFt : token.distanceFt;
+      return Number.isFinite(distance) && distance >= 0 && distance <= limit;
+    });
+  if (!candidates.length) return null;
+
+  candidates.sort((a, b) => {
+    const ad = Number.isFinite(a.orthDistanceFt) ? a.orthDistanceFt : a.distanceFt;
+    const bd = Number.isFinite(b.orthDistanceFt) ? b.orthDistanceFt : b.distanceFt;
+    if (ad !== bd) return ad - bd;
+    return String(a.name || a.actorName || "").localeCompare(String(b.name || b.actorName || ""), "ko");
+  });
+  return candidates[0] || null;
+}
+
+function buildAmbientChatterInboundText({ audienceToken = null } = {}) {
+  const audienceName = ensureString(audienceToken?.name || audienceToken?.actorName || "nearby party");
+  const distance = Number.isFinite(Number(audienceToken?.orthDistanceFt))
+    ? Number(audienceToken.orthDistanceFt)
+    : Number(audienceToken?.distanceFt);
+  return [
+    "Ambient social scene beat.",
+    "You are in a non-combat idle moment near the party or nearby civilians.",
+    `Nearby audience: ${audienceName}`,
+    `Distance: ${Number.isFinite(distance) ? `${distance}ft` : "unknown"}`,
+    "Say one short in-world line that fits the location and your personality.",
+    "Speak only. No movement, inspect, combat actions, or image requests. Intent must remain none.",
+    "Keep it brief and natural.",
+  ].join("\n");
+}
+
 function isTargetChannel(message, channelName) {
   const wanted = safeLower(channelName);
   if (!wanted) return true;
@@ -2344,6 +2393,7 @@ class AppRuntime {
     this._directorCallTimestamps = [];
     this._directorNpcCooldownUntil = new Map();
     this._directorSceneCooldownUntil = new Map();
+    this._ambientChatterPending = false;
 
     this._traceEnabled = false;
     this._traceToUi = false;
@@ -2792,6 +2842,7 @@ class AppRuntime {
     speakerHint = "",
     reactionGate = null,
     discordMessage = null,
+    skipInitialSceneCooldownCheck = false,
     runToken = 0,
   } = {}) {
     if (!primaryNpc) return;
@@ -2800,7 +2851,7 @@ class AppRuntime {
     if (!(Number(directorConfig.maxChainTurns) > 0) || !(Number(directorConfig.maxParticipants) > 1)) return;
 
     const sceneKey = this._buildDirectorSceneKey({ origin, primaryNpc, speakerHint, reactionGate });
-    if (sceneKey && this._isDirectorSceneCoolingDown(sceneKey)) {
+    if (!skipInitialSceneCooldownCheck && sceneKey && this._isDirectorSceneCoolingDown(sceneKey)) {
       this._trace("director.scene.skip", {
         reason: "scene-cooldown",
         sceneKey,
@@ -2926,6 +2977,204 @@ class AppRuntime {
     if (spoke && sceneKey) {
       this._markDirectorSceneCooldown(sceneKey, directorConfig);
     }
+  }
+
+  async _pickAmbientChatterLead({ config, runToken = 0 } = {}) {
+    const candidates = [];
+    for (const npc of pickEnabledNpcs(config)) {
+      const directorConfig = resolveDirectorConfig({ config, npc });
+      if (!directorConfig.enabled || directorConfig.mode === "off" || !directorConfig.allowAmbientTalk) continue;
+      if (this._isDirectorNpcCoolingDown(npc?.id)) continue;
+
+      let sceneContext = null;
+      try {
+        sceneContext = await this._getTacticalSceneContext(npc, 18, runToken);
+      } catch (e) {
+        if (this._isRuntimeAbortError(e)) throw e;
+        continue;
+      }
+      if (!sceneContext?.ok) continue;
+
+      const audienceToken = pickAmbientAudienceFromSceneContext(sceneContext, directorConfig.playerNearbyFt);
+      if (!audienceToken?.id) continue;
+      const distance = Number.isFinite(Number(audienceToken.orthDistanceFt))
+        ? Number(audienceToken.orthDistanceFt)
+        : Number(audienceToken.distanceFt);
+      const score = Math.max(0, Number(directorConfig.socialWeight || 1)) * 20 + (Number.isFinite(distance) ? Math.max(0, 40 - distance) : 8);
+      candidates.push({
+        npc,
+        directorConfig,
+        sceneContext,
+        audienceToken,
+        score,
+      });
+    }
+
+    candidates.sort((a, b) => {
+      if (a.score !== b.score) return b.score - a.score;
+      const ad = Number.isFinite(Number(a?.audienceToken?.orthDistanceFt))
+        ? Number(a.audienceToken.orthDistanceFt)
+        : Number(a?.audienceToken?.distanceFt);
+      const bd = Number.isFinite(Number(b?.audienceToken?.orthDistanceFt))
+        ? Number(b.audienceToken.orthDistanceFt)
+        : Number(b?.audienceToken?.distanceFt);
+      if (ad !== bd) return ad - bd;
+      return ensureString(a?.npc?.displayName || a?.npc?.id || "").localeCompare(
+        ensureString(b?.npc?.displayName || b?.npc?.id || ""),
+        "ko"
+      );
+    });
+
+    return candidates[0] || null;
+  }
+
+  async _generateAmbientChatterText({ config, npc, audienceToken, runToken = 0 } = {}) {
+    const npcName = String(npc?.displayName || npc?.id || "NPC");
+    const directorConfig = resolveDirectorConfig({ config, npc });
+    const [personaText, directorPromptText] = await Promise.all([
+      loadNpcPromptDocs({ config, npc }),
+      loadDirectorPromptText({ config, npc }),
+    ]);
+    this._throwIfRuntimeStopped(runToken);
+
+    let fvttReady = false;
+    let fvttChatContext = [];
+    let fvttSceneContext = null;
+    let fvttActorSheet = null;
+    try {
+      const fvttClient = await this._ensureFvttClientForNpc(npc, runToken);
+      fvttReady = true;
+      const chat = await fvttClient.getRecentChat(10);
+      if (chat?.ok) fvttChatContext = chat.messages || [];
+      this._throwIfRuntimeStopped(runToken);
+      fvttSceneContext = await this._getTacticalSceneContext(npc, 30, runToken);
+      fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet(), { runToken });
+    } catch (e) {
+      if (this._isRuntimeAbortError(e)) throw e;
+      this.log.warn("ambient", `context failed (${npcName}): ${e?.message || e}`);
+      this._trace("ambient.context.error", { npcId: npc?.id || "", error: e });
+    }
+
+    const prompt = buildNpcPrompt({
+      npc,
+      inboundText: buildAmbientChatterInboundText({ audienceToken }),
+      fvttReady,
+      personaText,
+      fvttChatContext,
+      fvttSceneContext,
+      fvttActorSheet,
+      mentionedSceneTokens: [],
+      imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
+      directorConfig,
+      directorPromptText,
+    });
+
+    try {
+      const completion = await this._completeNpcJson({
+        config,
+        prompt,
+        timeoutMs: 60_000,
+        traceMeta: {
+          origin: "ambient-chatter",
+          npcId: npc?.id || "",
+          npcName,
+          audience: String(audienceToken?.name || audienceToken?.actorName || ""),
+        },
+      });
+      this._throwIfRuntimeStopped(runToken);
+      const normalized = normalizeIntent(completion?.parsed);
+      const actionTag = extractFvttActionTags(normalized.replyText);
+      const replyText = actionTag.hadTag ? actionTag.visibleText || "" : String(normalized.replyText || "");
+      return String(replyText || "").trim();
+    } catch (e) {
+      if (this._isRuntimeAbortError(e)) throw e;
+      this.log.warn("ambient", `generation failed (${npcName}): ${e?.message || e}`);
+      this._trace("ambient.generation.error", {
+        npcId: npc?.id || "",
+        error: e,
+      });
+      return "";
+    }
+  }
+
+  async _pollAmbientChatter(config) {
+    if (!this.started) return;
+    if (!config?.foundry?.enabled) return;
+    if (this._ambientChatterPending) return;
+    if (Array.from(this._lastCombatStateByNpc.values()).some((state) => state?.inCombat || state?.actorInCombat)) {
+      return;
+    }
+
+    this._ambientChatterPending = true;
+    await this._enqueueSerialTask(async (runToken) => {
+      const lead = await this._pickAmbientChatterLead({ config, runToken });
+      this._throwIfRuntimeStopped(runToken);
+      if (!lead?.npc || !lead?.audienceToken) return;
+
+      const reactionGate = {
+        sourceTokenId: String(lead.audienceToken.id || ""),
+        sourceTokenName: String(lead.audienceToken.name || lead.audienceToken.actorName || ""),
+        distanceFt: Number.isFinite(Number(lead.audienceToken.orthDistanceFt))
+          ? Number(lead.audienceToken.orthDistanceFt)
+          : Number(lead.audienceToken.distanceFt),
+      };
+      const sceneKey = this._buildDirectorSceneKey({
+        origin: "ambient",
+        primaryNpc: lead.npc,
+        speakerHint: reactionGate.sourceTokenName,
+        reactionGate,
+      });
+      if (sceneKey && this._isDirectorSceneCoolingDown(sceneKey)) return;
+      if (!this._tryReserveDirectorBudget(lead.directorConfig, 1)) {
+        this._trace("ambient.skip", {
+          reason: "budget-exhausted",
+          npcId: lead?.npc?.id || "",
+        });
+        return;
+      }
+
+      const ambientText = await this._generateAmbientChatterText({
+        config,
+        npc: lead.npc,
+        audienceToken: lead.audienceToken,
+        runToken,
+      });
+      this._throwIfRuntimeStopped(runToken);
+      if (!ambientText) return;
+
+      await this._withNpcActor(lead.npc, () => this.fvtt.speakAsActor(ambientText), { runToken });
+      this._trace("ambient.speak", {
+        npcId: lead.npc?.id || "",
+        npcName: lead.npc?.displayName || "",
+        audience: reactionGate.sourceTokenName,
+        text: ambientText,
+      });
+      this._markDirectorNpcCooldown(lead.npc?.id, lead.directorConfig);
+
+      await this._maybeRunDirectorConversation({
+        config,
+        origin: "ambient",
+        primaryNpc: lead.npc,
+        primaryReplyText: ambientText,
+        inboundText: `Quiet idle scene near ${reactionGate.sourceTokenName || "the party"}.`,
+        speakerHint: reactionGate.sourceTokenName,
+        reactionGate,
+        skipInitialSceneCooldownCheck: true,
+        runToken,
+      });
+
+      if (!this._isDirectorSceneCoolingDown(sceneKey)) {
+        this._markDirectorSceneCooldown(sceneKey, lead.directorConfig);
+      }
+    })
+      .catch((e) => {
+        if (this._isRuntimeAbortError(e)) return;
+        this.log.warn("ambient", `poll failed: ${e?.message || e}`);
+        this._trace("ambient.poll.error", { error: e });
+      })
+      .finally(() => {
+        this._ambientChatterPending = false;
+      });
   }
 
   async start({ config, persistConfig } = {}) {
@@ -3333,6 +3582,7 @@ class AppRuntime {
     this._directorCallTimestamps = [];
     this._directorNpcCooldownUntil.clear();
     this._directorSceneCooldownUntil.clear();
+    this._ambientChatterPending = false;
   }
 
   async _pollFvttObservers(config) {
@@ -3341,6 +3591,7 @@ class AppRuntime {
     try {
       await this._pollFvttChat(config);
       await this._pollFvttCombatTurns(config);
+      await this._pollAmbientChatter(config);
     } finally {
       this._fvttObserverInFlight = false;
     }

@@ -190,3 +190,100 @@ test("smoke: director adds one nearby follow-up and scene cooldown blocks immedi
   assert.deepEqual(speaks, [{ actorName: "Town Guard", text: "Hold the line. I heard the same rumor." }]);
   assert.deepEqual(discordLines, ["**Town Guard:** Hold the line. I heard the same rumor."]);
 });
+
+test("smoke: ambient chatter produces one idle line and one follow-up, then cools down", async () => {
+  const runtime = new AppRuntime();
+  runtime.started = true;
+  runtime._fvttObserverInFlight = false;
+  runtime._lastCombatStateByNpc.clear();
+  runtime._directorNpcCooldownUntil.clear();
+  runtime._directorSceneCooldownUntil.clear();
+  const runToken = runtime._beginRunToken();
+
+  const barkeep = createNpc("barkeep", "Barkeep", { socialWeight: 2 });
+  const guard = createNpc("guard", "Town Guard", { socialWeight: 1 });
+  const config = {
+    foundry: {
+      enabled: true,
+      defaultSessionId: "gm",
+    },
+    npc: {
+      director: {
+        enabled: true,
+        mode: "nearby",
+        allowAmbientTalk: true,
+        allowNpcToNpc: true,
+        playerNearbyFt: 30,
+        maxChainTurns: 2,
+        maxParticipants: 3,
+        npcCooldownMs: 60000,
+        sceneCooldownMs: 60000,
+        tokenBudgetPerWindow: 8,
+        tokenBudgetWindowMs: 600000,
+        lineDelayMinMs: 0,
+        lineDelayMaxMs: 0,
+      },
+    },
+    npcs: [barkeep, guard],
+  };
+
+  const speaks = [];
+  const client = {
+    config: {
+      foundry: {
+        actorId: "",
+        actorName: "",
+      },
+    },
+    async ensureConnected() {
+      return { ok: true };
+    },
+    async getRecentChat() {
+      return { ok: true, messages: [] };
+    },
+    async getActorSheet() {
+      return { ok: true, actorName: this.config.foundry.actorName };
+    },
+    async speakAsActor(text) {
+      speaks.push({
+        actorName: String(this.config.foundry.actorName || ""),
+        text: String(text || ""),
+      });
+      return { ok: true };
+    },
+  };
+
+  runtime.fvtt = client;
+  runtime.fvttDefaultSessionId = "gm";
+  runtime.fvttSessionConfigs = [{ sessionId: "gm", userId: "", username: "GM" }];
+  runtime.fvttClientsBySessionId = new Map([["gm", client]]);
+  runtime._getTacticalSceneContext = async () => makeScene(8);
+  runtime._completeNpcJson = async ({ traceMeta }) => {
+    if (traceMeta?.origin === "ambient-chatter") {
+      return {
+        parsed: {
+          replyText: "Fresh stew is almost ready.",
+          intent: { type: "none", args: {} },
+        },
+      };
+    }
+    if (traceMeta?.origin === "director-followup") {
+      return {
+        parsed: {
+          replyText: "And keep your purse close tonight.",
+          intent: { type: "none", args: {} },
+        },
+      };
+    }
+    throw new Error(`unexpected completion origin: ${traceMeta?.origin || "unknown"}`);
+  };
+
+  await runtime._pollAmbientChatter(config);
+  await runtime._pollAmbientChatter(config);
+  runtime._throwIfRuntimeStopped(runToken);
+
+  assert.deepEqual(speaks, [
+    { actorName: "Barkeep", text: "Fresh stew is almost ready." },
+    { actorName: "Town Guard", text: "And keep your purse close tonight." },
+  ]);
+});
