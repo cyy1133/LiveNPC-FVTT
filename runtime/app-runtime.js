@@ -470,6 +470,152 @@ async function loadDirectorPromptText({ config, npc } = {}) {
   return readMaybe(resolved.promptFile);
 }
 
+async function loadDirectorPersonaNote(npc) {
+  const docs = isPlainObject(npc?.personaDocs) ? npc.personaDocs : {};
+  const [identity, soul, behavior, relations] = await Promise.all([
+    readMaybe(docs.identity),
+    readMaybe(docs.soul),
+    readMaybe(docs.behavior),
+    readMaybe(docs.relations),
+  ]);
+  const note = [identity, soul, behavior, relations]
+    .map((part) => compact(part, 180))
+    .filter(Boolean)
+    .join(" | ");
+  return compact(note, 260);
+}
+
+function normalizeDirectorFollowUpPlan(output, { candidateIds = [], limit = 0 } = {}) {
+  const root = isPlainObject(output) ? output : {};
+  const raw = ensureArray(root.followUps);
+  const allowed = new Set(candidateIds.map((id) => ensureString(id)).filter(Boolean));
+  const out = [];
+  const seen = new Set();
+
+  for (const item of raw) {
+    if (!isPlainObject(item)) continue;
+    const npcId = ensureString(item.npcId || item.id || "");
+    if (!npcId || !allowed.has(npcId) || seen.has(npcId)) continue;
+    const target = ensureString(item.target || item.targetNpcId || "player") || "player";
+    const cue = compact(item.cue || item.beat || item.reason || "", 220);
+    out.push({ npcId, target, cue });
+    seen.add(npcId);
+    if (limit > 0 && out.length >= limit) break;
+  }
+
+  return out;
+}
+
+function pickHeuristicDirectorFollowUps({ candidates = [], limit = 0, previousSpeakerNpcId = "" } = {}) {
+  const max = Math.max(0, Number(limit) || 0);
+  if (!max) return [];
+  const picked = [];
+  let lastNpcId = ensureString(previousSpeakerNpcId);
+
+  for (const candidate of candidates) {
+    if (!candidate?.npc?.id) continue;
+    const npcId = ensureString(candidate.npc.id);
+    if (!npcId) continue;
+    const target = candidate?.directorConfig?.allowNpcToNpc && lastNpcId ? lastNpcId : "player";
+    const cue =
+      target === "player"
+        ? "Add one short nearby reaction that fits the current scene."
+        : "Briefly react to the previous NPC and add one useful detail.";
+    picked.push({ npcId, target, cue });
+    lastNpcId = npcId;
+    if (picked.length >= max) break;
+  }
+
+  return picked;
+}
+
+function buildDirectorPlannerPrompt({
+  inboundText,
+  speakerHint,
+  primaryNpc,
+  primaryReplyText,
+  followUpLimit = 0,
+  directorConfig = null,
+  directorPromptText = "",
+  candidates = [],
+} = {}) {
+  const primaryNpcName = String(primaryNpc?.displayName || primaryNpc?.id || "NPC").trim();
+  const director = directorConfig && typeof directorConfig === "object" ? directorConfig : {};
+  const lines = [
+    "You are the social scene director for nearby NPC follow-ups.",
+    "Return a single JSON object only. No markdown fence. No extra text.",
+    '{ "followUps": [ { "npcId": "npc-id", "target": "player|npc-id", "cue": "short direction" } ] }',
+    "",
+    "Rules:",
+    `- Select at most ${Math.max(0, Number(followUpLimit) || 0)} follow-up beats.`,
+    "- Choose only from the provided candidate NPC ids.",
+    '- If no extra follow-up is needed, return {"followUps":[]}.',
+    "- Keep cues short and actionable.",
+    "- Favor nearby NPCs, social weight, and natural conversational flow.",
+    "- Avoid loops and avoid assigning the same NPC twice.",
+    "",
+    "Current scene:",
+    `- speaker/player hint: ${String(speakerHint || "unknown").trim() || "unknown"}`,
+    `- inbound line: ${String(inboundText || "").trim() || "(none)"}`,
+    `- first reply already spoken by ${primaryNpcName}: ${String(primaryReplyText || "").trim() || "(silent)"}`,
+    "",
+    "Resolved director policy:",
+    `- mode: ${String(director.mode || "nearby")}`,
+    `- ambient talk allowed: ${director.allowAmbientTalk ? "yes" : "no"}`,
+    `- NPC-to-NPC talk allowed: ${director.allowNpcToNpc ? "yes" : "no"}`,
+    `- max participants: ${Number(director.maxParticipants || 0)}`,
+    `- max extra NPC turns: ${Number(director.maxChainTurns || 0)}`,
+  ];
+
+  const promptText = String(directorPromptText || "").trim();
+  if (promptText) {
+    lines.push("", "Director prompt:", promptText);
+  }
+
+  lines.push("", "Candidates:");
+  for (const candidate of candidates) {
+    const npcId = ensureString(candidate?.npc?.id);
+    const npcName = ensureString(candidate?.npc?.displayName || candidate?.npc?.id || npcId);
+    const note = ensureString(candidate?.personaNote || "");
+    const distance = Number(candidate?.sourceDistanceFt);
+    lines.push(
+      `- id=${npcId} name=${npcName} distance=${Number.isFinite(distance) ? `${distance}ft` : "unknown"} socialWeight=${Number(candidate?.directorConfig?.socialWeight || 0)} ambient=${candidate?.directorConfig?.allowAmbientTalk ? "yes" : "no"} npcToNpc=${candidate?.directorConfig?.allowNpcToNpc ? "yes" : "no"} note=${note || "(none)"}`
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function buildDirectorFollowUpInboundText({
+  inboundText,
+  speakerHint,
+  primaryNpc,
+  targetNpcName = "",
+  cue = "",
+  conversationLog = [],
+} = {}) {
+  const history = ensureArray(conversationLog)
+    .slice(-4)
+    .map((line, index) => {
+      const speaker = String(line?.speakerName || line?.npcName || line?.target || "speaker").trim() || "speaker";
+      const text = String(line?.text || "").trim() || "(silent)";
+      return `${index + 1}. ${speaker}: ${text}`;
+    });
+  const primaryNpcName = String(primaryNpc?.displayName || primaryNpc?.id || "NPC").trim() || "NPC";
+
+  return [
+    "This is a non-combat social follow-up beat scheduled by the director.",
+    "Speak only. Do not move, inspect, attack, or create images. Intent must remain none.",
+    `Original player/speaker: ${String(speakerHint || "unknown").trim() || "unknown"}`,
+    `Original line: ${String(inboundText || "").trim() || "(none)"}`,
+    `Primary NPC who already spoke: ${primaryNpcName}`,
+    `Assigned target: ${String(targetNpcName || "player").trim() || "player"}`,
+    `Director cue: ${String(cue || "Add a short natural follow-up.").trim()}`,
+    history.length ? "Conversation so far:\n" + history.join("\n") : "Conversation so far:\n1. (none)",
+    "Keep the line brief and natural.",
+  ].join("\n");
+}
+
 function isTargetChannel(message, channelName) {
   const wanted = safeLower(channelName);
   if (!wanted) return true;
@@ -2195,6 +2341,9 @@ class AppRuntime {
     this._lastCombatStateByNpc = new Map();
     this._fvttInboundCutoffTs = 0;
     this._openAiScopeHintShown = false;
+    this._directorCallTimestamps = [];
+    this._directorNpcCooldownUntil = new Map();
+    this._directorSceneCooldownUntil = new Map();
 
     this._traceEnabled = false;
     this._traceToUi = false;
@@ -2281,6 +2430,502 @@ class AppRuntime {
       throw new Error(String(connected?.error || "fvtt-connect-failed"));
     }
     return fvttClient;
+  }
+
+  _pruneDirectorBudget(windowMs, now = Date.now()) {
+    const horizon = Math.max(0, Number(windowMs) || 0);
+    this._directorCallTimestamps = ensureArray(this._directorCallTimestamps).filter((ts) => now - Number(ts || 0) <= horizon);
+  }
+
+  _tryReserveDirectorBudget(directorConfig, cost = 1, now = Date.now()) {
+    const limit = Math.max(0, Number(directorConfig?.tokenBudgetPerWindow) || 0);
+    const windowMs = Math.max(1, Number(directorConfig?.tokenBudgetWindowMs) || 1);
+    const normalizedCost = Math.max(0, Number(cost) || 0);
+    if (!normalizedCost) return true;
+    if (!limit) return false;
+    this._pruneDirectorBudget(windowMs, now);
+    if (this._directorCallTimestamps.length + normalizedCost > limit) return false;
+    for (let i = 0; i < normalizedCost; i += 1) {
+      this._directorCallTimestamps.push(now);
+    }
+    return true;
+  }
+
+  _isDirectorNpcCoolingDown(npcId, now = Date.now()) {
+    const key = ensureString(npcId);
+    if (!key) return false;
+    const until = Number(this._directorNpcCooldownUntil.get(key) || 0);
+    if (until > now) return true;
+    if (until > 0) this._directorNpcCooldownUntil.delete(key);
+    return false;
+  }
+
+  _markDirectorNpcCooldown(npcId, directorConfig, now = Date.now()) {
+    const key = ensureString(npcId);
+    if (!key) return;
+    const cooldownMs = Math.max(0, Number(directorConfig?.npcCooldownMs) || 0);
+    if (!cooldownMs) return;
+    this._directorNpcCooldownUntil.set(key, now + cooldownMs);
+  }
+
+  _buildDirectorSceneKey({ origin = "", primaryNpc = null, speakerHint = "", reactionGate = null } = {}) {
+    const sessionId = resolveNpcFoundrySessionId({
+      npc: primaryNpc,
+      sessionConfigs: this.fvttSessionConfigs,
+      defaultSessionId: this.fvttDefaultSessionId,
+    });
+    const sourceRef =
+      ensureString(reactionGate?.sourceTokenId || reactionGate?.sourceTokenName || speakerHint || primaryNpc?.id || "scene") || "scene";
+    return `${ensureString(origin || "director") || "director"}|${sessionId || "default"}|${normalizeTokenKey(sourceRef) || safeLower(sourceRef) || "scene"}`;
+  }
+
+  _isDirectorSceneCoolingDown(sceneKey, now = Date.now()) {
+    const key = ensureString(sceneKey);
+    if (!key) return false;
+    const until = Number(this._directorSceneCooldownUntil.get(key) || 0);
+    if (until > now) return true;
+    if (until > 0) this._directorSceneCooldownUntil.delete(key);
+    return false;
+  }
+
+  _markDirectorSceneCooldown(sceneKey, directorConfig, now = Date.now()) {
+    const key = ensureString(sceneKey);
+    if (!key) return;
+    const cooldownMs = Math.max(0, Number(directorConfig?.sceneCooldownMs) || 0);
+    if (!cooldownMs) return;
+    this._directorSceneCooldownUntil.set(key, now + cooldownMs);
+  }
+
+  _randomDirectorDelayMs(directorConfig) {
+    const min = Math.max(0, Number(directorConfig?.lineDelayMinMs) || 0);
+    const max = Math.max(min, Number(directorConfig?.lineDelayMaxMs) || min);
+    if (max <= min) return min;
+    return min + Math.round(Math.random() * (max - min));
+  }
+
+  async _buildDirectorCandidatePool({
+    config,
+    primaryNpc = null,
+    inboundText = "",
+    speakerHint = "",
+    requireAmbientTalk = false,
+    runToken = 0,
+  } = {}) {
+    const primaryId = ensureString(primaryNpc?.id);
+    const loweredText = safeLower(inboundText);
+    const out = [];
+
+    for (const candidate of pickEnabledNpcs(config)) {
+      const candidateId = ensureString(candidate?.id);
+      if (!candidateId || candidateId === primaryId) continue;
+
+      const directorConfig = resolveDirectorConfig({ config, npc: candidate });
+      if (!directorConfig.enabled || directorConfig.mode === "off") continue;
+      if (requireAmbientTalk && !directorConfig.allowAmbientTalk) continue;
+      if (!requireAmbientTalk && !directorConfig.allowAmbientTalk && !directorConfig.allowNpcToNpc) continue;
+      if (this._isDirectorNpcCoolingDown(candidateId)) continue;
+
+      let sceneContext = null;
+      try {
+        sceneContext = await this._getTacticalSceneContext(candidate, 18, runToken);
+      } catch (e) {
+        if (this._isRuntimeAbortError(e)) throw e;
+        continue;
+      }
+      if (!sceneContext?.ok) continue;
+
+      const reactionGate = evaluateNpcReactionDistance({
+        npc: candidate,
+        sceneContext,
+        text: inboundText,
+        speakerHint,
+        preferSpeaker: true,
+        allowTextFallback: true,
+      });
+      if (reactionGate.enabled && !reactionGate.allowed) continue;
+
+      const sourceDistanceFt = Number(reactionGate.distanceFt);
+      if (Number.isFinite(sourceDistanceFt) && sourceDistanceFt > Number(directorConfig.playerNearbyFt || 0)) {
+        continue;
+      }
+
+      const displayName = ensureString(candidate?.displayName || candidate?.id || "");
+      const mentionScore = displayName && loweredText.includes(safeLower(displayName)) ? 35 : 0;
+      const distanceScore = Number.isFinite(sourceDistanceFt) ? Math.max(0, 50 - sourceDistanceFt) : 10;
+      const socialScore = Math.max(0, Number(directorConfig.socialWeight || 1)) * 15;
+      const npcToNpcScore = directorConfig.allowNpcToNpc ? 6 : 0;
+      const ambientScore = directorConfig.allowAmbientTalk ? 4 : 0;
+
+      out.push({
+        npc: candidate,
+        directorConfig,
+        sceneContext,
+        reactionGate,
+        sourceDistanceFt,
+        score: mentionScore + distanceScore + socialScore + npcToNpcScore + ambientScore,
+      });
+    }
+
+    out.sort((a, b) => {
+      if (a.score !== b.score) return b.score - a.score;
+      const ad = Number.isFinite(Number(a.sourceDistanceFt)) ? Number(a.sourceDistanceFt) : Number.POSITIVE_INFINITY;
+      const bd = Number.isFinite(Number(b.sourceDistanceFt)) ? Number(b.sourceDistanceFt) : Number.POSITIVE_INFINITY;
+      if (ad !== bd) return ad - bd;
+      return ensureString(a?.npc?.displayName || a?.npc?.id || "").localeCompare(
+        ensureString(b?.npc?.displayName || b?.npc?.id || ""),
+        "ko"
+      );
+    });
+
+    return out;
+  }
+
+  async _pickDirectorLeadNpc({ config, inboundText = "", speakerHint = "", runToken = 0 } = {}) {
+    const pool = await this._buildDirectorCandidatePool({
+      config,
+      inboundText,
+      speakerHint,
+      requireAmbientTalk: true,
+      runToken,
+    });
+    return pool[0]?.npc || null;
+  }
+
+  async _planDirectorFollowUps({
+    config,
+    primaryNpc,
+    primaryReplyText,
+    inboundText,
+    speakerHint,
+    directorConfig,
+    candidatePool,
+    runToken = 0,
+  } = {}) {
+    const maxFollowUps = Math.max(
+      0,
+      Math.min(
+        Number(directorConfig?.maxChainTurns || 0),
+        Math.max(0, Number(directorConfig?.maxParticipants || 0) - 1),
+        ensureArray(candidatePool).length
+      )
+    );
+    if (!maxFollowUps) return [];
+
+    const heuristic = pickHeuristicDirectorFollowUps({
+      candidates: candidatePool,
+      limit: maxFollowUps,
+      previousSpeakerNpcId: ensureString(primaryNpc?.id),
+    });
+    if (directorConfig?.mode !== "directed" || ensureArray(candidatePool).length <= 1) {
+      return heuristic;
+    }
+
+    const plannerCost = 1;
+    if (!this._tryReserveDirectorBudget(directorConfig, plannerCost)) {
+      this._trace("director.plan.skip", {
+        reason: "budget-exhausted",
+        primaryNpcId: primaryNpc?.id || "",
+      });
+      return heuristic;
+    }
+
+    const trimmedCandidates = ensureArray(candidatePool).slice(0, Math.max(maxFollowUps + 1, 3));
+    const candidatesWithNotes = await Promise.all(
+      trimmedCandidates.map(async (candidate) => ({
+        ...candidate,
+        personaNote: await loadDirectorPersonaNote(candidate.npc),
+      }))
+    );
+    this._throwIfRuntimeStopped(runToken);
+
+    const directorPromptText = await loadDirectorPromptText({ config, npc: primaryNpc });
+    const prompt = buildDirectorPlannerPrompt({
+      inboundText,
+      speakerHint,
+      primaryNpc,
+      primaryReplyText,
+      followUpLimit: maxFollowUps,
+      directorConfig,
+      directorPromptText,
+      candidates: candidatesWithNotes,
+    });
+
+    try {
+      const completion = await this._completeNpcJson({
+        config,
+        prompt,
+        timeoutMs: 60_000,
+        traceMeta: {
+          origin: "director-plan",
+          primaryNpcId: primaryNpc?.id || "",
+          primaryNpcName: primaryNpc?.displayName || "",
+        },
+      });
+      this._throwIfRuntimeStopped(runToken);
+      const plan = normalizeDirectorFollowUpPlan(completion?.parsed, {
+        candidateIds: candidatesWithNotes.map((candidate) => candidate?.npc?.id || ""),
+        limit: maxFollowUps,
+      });
+      this._trace("director.plan.result", {
+        primaryNpcId: primaryNpc?.id || "",
+        requested: maxFollowUps,
+        candidates: candidatesWithNotes.map((candidate) => ({
+          npcId: candidate?.npc?.id || "",
+          score: candidate?.score || 0,
+        })),
+        plan,
+      });
+      return plan.length ? plan : heuristic;
+    } catch (e) {
+      if (this._isRuntimeAbortError(e)) throw e;
+      this.log.warn("director", `planner failed (${primaryNpc?.displayName || primaryNpc?.id || "NPC"}): ${e?.message || e}`);
+      this._trace("director.plan.error", {
+        primaryNpcId: primaryNpc?.id || "",
+        error: e,
+      });
+      return heuristic;
+    }
+  }
+
+  async _generateDirectorFollowUpText({
+    config,
+    npc,
+    primaryNpc,
+    inboundText,
+    speakerHint,
+    beat,
+    conversationLog,
+    runToken = 0,
+  } = {}) {
+    const npcName = String(npc?.displayName || npc?.id || "NPC");
+    const directorConfig = resolveDirectorConfig({ config, npc });
+    const [personaText, directorPromptText] = await Promise.all([
+      loadNpcPromptDocs({ config, npc }),
+      loadDirectorPromptText({ config, npc }),
+    ]);
+    this._throwIfRuntimeStopped(runToken);
+
+    let fvttReady = false;
+    let fvttChatContext = [];
+    let fvttSceneContext = null;
+    let fvttActorSheet = null;
+    try {
+      const fvttClient = await this._ensureFvttClientForNpc(npc, runToken);
+      fvttReady = true;
+      const chat = await fvttClient.getRecentChat(10);
+      if (chat?.ok) fvttChatContext = chat.messages || [];
+      this._throwIfRuntimeStopped(runToken);
+      fvttSceneContext = await this._getTacticalSceneContext(npc, 30, runToken);
+      fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet(), { runToken });
+    } catch (e) {
+      if (this._isRuntimeAbortError(e)) throw e;
+      this.log.warn("director", `follow-up context failed (${npcName}): ${e?.message || e}`);
+      this._trace("director.followup.context.error", { npcId: npc?.id || "", error: e });
+    }
+
+    const targetNpcName =
+      String(
+        ensureArray(conversationLog)
+          .slice()
+          .reverse()
+          .find((line) => String(line?.npcId || "") === String(beat?.target || ""))
+          ?.speakerName ||
+          (String(beat?.target || "") === String(primaryNpc?.id || "") ? primaryNpc?.displayName || primaryNpc?.id || "" : "")
+      ).trim() || "player";
+    const followUpText = buildDirectorFollowUpInboundText({
+      inboundText,
+      speakerHint,
+      primaryNpc,
+      targetNpcName: beat?.target === "player" ? "player" : targetNpcName,
+      cue: beat?.cue || "",
+      conversationLog,
+    });
+    const prompt = buildNpcPrompt({
+      npc,
+      inboundText: followUpText,
+      fvttReady,
+      personaText,
+      fvttChatContext,
+      fvttSceneContext,
+      fvttActorSheet,
+      mentionedSceneTokens: [],
+      imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
+      directorConfig,
+      directorPromptText,
+    });
+
+    try {
+      const completion = await this._completeNpcJson({
+        config,
+        prompt,
+        timeoutMs: 60_000,
+        traceMeta: {
+          origin: "director-followup",
+          npcId: npc?.id || "",
+          npcName,
+          target: String(beat?.target || "player"),
+        },
+      });
+      this._throwIfRuntimeStopped(runToken);
+      const normalized = normalizeIntent(completion?.parsed);
+      const actionTag = extractFvttActionTags(normalized.replyText);
+      const replyText = actionTag.hadTag ? actionTag.visibleText || "" : String(normalized.replyText || "");
+      return String(replyText || "").trim();
+    } catch (e) {
+      if (this._isRuntimeAbortError(e)) throw e;
+      this.log.warn("director", `follow-up generation failed (${npcName}): ${e?.message || e}`);
+      this._trace("director.followup.error", {
+        npcId: npc?.id || "",
+        target: String(beat?.target || "player"),
+        error: e,
+      });
+      return "";
+    }
+  }
+
+  async _maybeRunDirectorConversation({
+    config,
+    origin = "fvtt",
+    primaryNpc,
+    primaryReplyText,
+    inboundText,
+    speakerHint = "",
+    reactionGate = null,
+    discordMessage = null,
+    runToken = 0,
+  } = {}) {
+    if (!primaryNpc) return;
+    const directorConfig = resolveDirectorConfig({ config, npc: primaryNpc });
+    if (!directorConfig.enabled || directorConfig.mode === "off") return;
+    if (!(Number(directorConfig.maxChainTurns) > 0) || !(Number(directorConfig.maxParticipants) > 1)) return;
+
+    const sceneKey = this._buildDirectorSceneKey({ origin, primaryNpc, speakerHint, reactionGate });
+    if (sceneKey && this._isDirectorSceneCoolingDown(sceneKey)) {
+      this._trace("director.scene.skip", {
+        reason: "scene-cooldown",
+        sceneKey,
+        primaryNpcId: primaryNpc?.id || "",
+      });
+      return;
+    }
+
+    const candidatePool = await this._buildDirectorCandidatePool({
+      config,
+      primaryNpc,
+      inboundText,
+      speakerHint,
+      runToken,
+    });
+    this._throwIfRuntimeStopped(runToken);
+    if (!candidatePool.length) return;
+
+    const followUps = await this._planDirectorFollowUps({
+      config,
+      primaryNpc,
+      primaryReplyText,
+      inboundText,
+      speakerHint,
+      directorConfig,
+      candidatePool,
+      runToken,
+    });
+    this._throwIfRuntimeStopped(runToken);
+    if (!followUps.length) return;
+
+    const candidateMap = new Map(candidatePool.map((candidate) => [String(candidate?.npc?.id || ""), candidate]));
+    const conversationLog = [
+      {
+        npcId: "",
+        speakerName: String(speakerHint || "player").trim() || "player",
+        text: String(inboundText || "").trim(),
+        target: String(primaryNpc?.id || ""),
+      },
+      {
+        npcId: String(primaryNpc?.id || ""),
+        speakerName: String(primaryNpc?.displayName || primaryNpc?.id || "NPC"),
+        text: String(primaryReplyText || "").trim(),
+        target: "player",
+      },
+    ];
+
+    let spoke = false;
+    for (const beat of followUps) {
+      this._throwIfRuntimeStopped(runToken);
+      const candidate = candidateMap.get(String(beat?.npcId || ""));
+      if (!candidate?.npc) continue;
+      if (this._isDirectorNpcCoolingDown(candidate.npc.id)) continue;
+      if (!this._tryReserveDirectorBudget(candidate.directorConfig, 1)) {
+        this._trace("director.followup.skip", {
+          reason: "budget-exhausted",
+          npcId: candidate?.npc?.id || "",
+        });
+        break;
+      }
+
+      const delayMs = this._randomDirectorDelayMs(candidate.directorConfig);
+      if (delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        this._throwIfRuntimeStopped(runToken);
+      }
+
+      const followText = await this._generateDirectorFollowUpText({
+        config,
+        npc: candidate.npc,
+        primaryNpc,
+        inboundText,
+        speakerHint,
+        beat,
+        conversationLog,
+        runToken,
+      });
+      this._throwIfRuntimeStopped(runToken);
+      if (!followText) continue;
+
+      const candidateName = String(candidate.npc?.displayName || candidate.npc?.id || "NPC");
+      try {
+        await this._withNpcActor(candidate.npc, () => this.fvtt.speakAsActor(followText), { runToken });
+        this._trace("director.followup.speak", {
+          origin,
+          npcId: candidate.npc?.id || "",
+          npcName: candidateName,
+          target: String(beat?.target || "player"),
+          text: followText,
+        });
+      } catch (e) {
+        if (this._isRuntimeAbortError(e)) throw e;
+        this.log.warn("director", `follow-up speak failed (${candidateName}): ${e?.message || e}`);
+        this._trace("director.followup.speak.error", {
+          origin,
+          npcId: candidate.npc?.id || "",
+          error: e,
+        });
+        continue;
+      }
+
+      if (origin === "discord" && discordMessage?.channel?.send) {
+        try {
+          await discordMessage.channel.send(`**${candidateName}:** ${followText}`);
+        } catch (e) {
+          this._trace("director.followup.discord.error", {
+            npcId: candidate.npc?.id || "",
+            error: e,
+          });
+        }
+      }
+
+      this._markDirectorNpcCooldown(candidate.npc.id, candidate.directorConfig);
+      conversationLog.push({
+        npcId: String(candidate.npc?.id || ""),
+        speakerName: candidateName,
+        text: followText,
+        target: String(beat?.target || "player"),
+      });
+      spoke = true;
+    }
+
+    if (spoke && sceneKey) {
+      this._markDirectorSceneCooldown(sceneKey, directorConfig);
+    }
   }
 
   async start({ config, persistConfig } = {}) {
@@ -2685,6 +3330,9 @@ class AppRuntime {
     this._processedFvttMessageIds.clear();
     this._processedCombatTurnKeysByNpc.clear();
     this._lastCombatStateByNpc.clear();
+    this._directorCallTimestamps = [];
+    this._directorNpcCooldownUntil.clear();
+    this._directorSceneCooldownUntil.clear();
   }
 
   async _pollFvttObservers(config) {
@@ -2768,26 +3416,35 @@ class AppRuntime {
           continue;
         }
 
-        const hitNpc = resolveNpcForDiscordMessage({
+        const directNpc = resolveNpcForDiscordMessage({
           content,
           npcs,
           defaultNpcId: "",
           allowSingleNpcFallback: false,
         });
-        if (!hitNpc) continue;
+        await this._enqueueSerialTask(async (runToken) => {
+          const hitNpc =
+            directNpc ||
+            (await this._pickDirectorLeadNpc({
+              config,
+              inboundText: content,
+              speakerHint: speaker,
+              runToken,
+            }));
+          if (!hitNpc) return;
 
-        this._trace("fvtt.chat.inbound", {
-          messageId: id,
-          speaker,
-          content,
-          npcId: hitNpc?.id || "",
-          npcName: hitNpc?.displayName || "",
-          sessionUser: ensureString(client?.config?.foundry?.username || ""),
-        });
+          this._trace("fvtt.chat.inbound", {
+            messageId: id,
+            speaker,
+            content,
+            npcId: hitNpc?.id || "",
+            npcName: hitNpc?.displayName || "",
+            resolvedBy: directNpc ? "direct" : "director",
+            sessionUser: ensureString(client?.config?.foundry?.username || ""),
+          });
 
-        await this._enqueueSerialTask((runToken) =>
-          this._handleNpcFvttInbound({ config, npc: hitNpc, speaker, text: content, runToken })
-        ).catch((e) => {
+          await this._handleNpcFvttInbound({ config, npc: hitNpc, speaker, text: content, runToken });
+        }).catch((e) => {
           if (!this._isRuntimeAbortError(e)) throw e;
         });
       }
@@ -3553,6 +4210,29 @@ class AppRuntime {
       this.log.warn("fvtt", `speak failed: ${e?.message || e}`);
       this._trace("fvtt.speak.error", { npcId: npc?.id || "", error: e, origin: "fvtt" });
     }
+
+    if (String(replyText || "").trim()) {
+      try {
+        await this._maybeRunDirectorConversation({
+          config,
+          origin: "fvtt",
+          primaryNpc: npc,
+          primaryReplyText: replyText,
+          inboundText: text,
+          speakerHint: speaker,
+          reactionGate,
+          runToken,
+        });
+      } catch (e) {
+        if (this._isRuntimeAbortError(e)) return;
+        this.log.warn("director", `follow-up scene failed (${npcName}): ${e?.message || e}`);
+        this._trace("director.scene.error", {
+          origin: "fvtt",
+          npcId: npc?.id || "",
+          error: e,
+        });
+      }
+    }
   }
 
   async runDiagnostics({ config, persistConfig } = {}) {
@@ -3804,7 +4484,7 @@ class AppRuntime {
       const cleaned = stripBotMention(raw, botUserId);
       if (!cleaned) return;
 
-      const npc = resolveNpcForDiscordMessage({
+      const directNpc = resolveNpcForDiscordMessage({
         content: cleaned,
         npcs,
         defaultNpcId: String(config?.npc?.defaultNpcId || "").trim(),
@@ -3821,24 +4501,28 @@ class AppRuntime {
         requireMention,
         raw,
         cleaned,
-        resolvedNpcId: npc?.id || "",
-        resolvedNpcName: npc?.displayName || "",
+        resolvedNpcId: directNpc?.id || "",
+        resolvedNpcName: directNpc?.displayName || "",
       });
 
-      if (!npc) {
-        // Multi-NPC, but no explicit selection in the message.
-        if (npcs.length > 1) {
-          await message
-            .reply(`?대뒓 NPC瑜?遺瑜댁떆?붿? ?대쫫??媛숈씠 ?곸뼱 二쇱꽭?? (?? "?묒튂湲??붿븘?? ...")`)
-            .catch(() => {});
-        }
-        return;
-      }
-
       // Queue per runtime to avoid concurrent page.evaluate / token conflicts.
-      await this._enqueueSerialTask((runToken) =>
-        this._handleNpcDiscordMessage({ config, npc, message, text: cleaned, runToken })
-      ).catch((e) => {
+      await this._enqueueSerialTask(async (runToken) => {
+        const npc =
+          directNpc ||
+          (await this._pickDirectorLeadNpc({
+            config,
+            inboundText: cleaned,
+            speakerHint: String(message?.member?.displayName || message?.author?.displayName || message?.author?.username || ""),
+            runToken,
+          }));
+        if (!npc) {
+          if (npcs.length > 1) {
+            await message.reply("어느 NPC에게 말하는지 이름을 같이 적어 주세요. 디렉터가 고를 수 있는 가까운 NPC도 아직 없었습니다.").catch(() => {});
+          }
+          return;
+        }
+        await this._handleNpcDiscordMessage({ config, npc, message, text: cleaned, runToken });
+      }).catch((e) => {
         if (!this._isRuntimeAbortError(e)) throw e;
       });
     });
@@ -4736,6 +5420,30 @@ class AppRuntime {
         requestMessageId: String(message?.id || ""),
         error: e,
       });
+    }
+
+    if (String(replyText || "").trim()) {
+      try {
+        await this._maybeRunDirectorConversation({
+          config,
+          origin: "discord",
+          primaryNpc: npc,
+          primaryReplyText: replyText,
+          inboundText: text,
+          speakerHint,
+          reactionGate,
+          discordMessage: message,
+          runToken,
+        });
+      } catch (e) {
+        if (this._isRuntimeAbortError(e)) return;
+        this.log.warn("director", `follow-up scene failed (${npcName}): ${e?.message || e}`);
+        this._trace("director.scene.error", {
+          origin: "discord",
+          npcId: npc?.id || "",
+          error: e,
+        });
+      }
     }
   }
 
