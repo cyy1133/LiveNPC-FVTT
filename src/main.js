@@ -209,6 +209,41 @@ ipcMain.handle("files:pickMarkdown", async (evt, { defaultPath } = {}) => {
   return { ok: true, canceled: false, path: String(result.filePaths[0] || "") };
 });
 
+ipcMain.handle("files:pickJsonOpen", async (evt, { defaultPath } = {}) => {
+  const owner = BrowserWindow.fromWebContents(evt.sender) || mainWindow || undefined;
+  const result = await dialog.showOpenDialog(owner, {
+    title: "Import scene preset JSON",
+    defaultPath: String(defaultPath || "").trim() || undefined,
+    properties: ["openFile"],
+    filters: [
+      { name: "JSON", extensions: ["json"] },
+      { name: "All Files", extensions: ["*"] },
+    ],
+  });
+
+  if (result.canceled || !Array.isArray(result.filePaths) || !result.filePaths.length) {
+    return { ok: false, canceled: true, path: "" };
+  }
+  return { ok: true, canceled: false, path: String(result.filePaths[0] || "") };
+});
+
+ipcMain.handle("files:pickJsonSave", async (evt, { defaultPath } = {}) => {
+  const owner = BrowserWindow.fromWebContents(evt.sender) || mainWindow || undefined;
+  const result = await dialog.showSaveDialog(owner, {
+    title: "Export scene preset JSON",
+    defaultPath: String(defaultPath || "").trim() || undefined,
+    filters: [
+      { name: "JSON", extensions: ["json"] },
+      { name: "All Files", extensions: ["*"] },
+    ],
+  });
+
+  if (result.canceled || !result.filePath) {
+    return { ok: false, canceled: true, path: "" };
+  }
+  return { ok: true, canceled: false, path: String(result.filePath || "") };
+});
+
 ipcMain.handle("files:readText", async (_evt, { filePath } = {}) => {
   const p = String(filePath || "").trim();
   if (!p) return { ok: false, error: "filePath is required", text: "" };

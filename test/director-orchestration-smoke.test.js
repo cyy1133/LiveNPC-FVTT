@@ -95,6 +95,9 @@ test("smoke: director adds one nearby follow-up and scene cooldown blocks immedi
       defaultSessionId: "gm",
     },
     npc: {
+      ambient: {
+        enabled: true,
+      },
       director: {
         enabled: true,
         mode: "nearby",
@@ -286,4 +289,78 @@ test("smoke: ambient chatter produces one idle line and one follow-up, then cool
     { actorName: "Barkeep", text: "Fresh stew is almost ready." },
     { actorName: "Town Guard", text: "And keep your purse close tonight." },
   ]);
+});
+
+test("smoke: ambient chatter respects the standalone ambient toggle", async () => {
+  const runtime = new AppRuntime();
+  runtime.started = true;
+  runtime._fvttObserverInFlight = false;
+  runtime._lastCombatStateByNpc.clear();
+  runtime._directorNpcCooldownUntil.clear();
+  runtime._directorSceneCooldownUntil.clear();
+
+  const barkeep = createNpc("barkeep", "Barkeep", { socialWeight: 2 });
+  const config = {
+    foundry: {
+      enabled: true,
+      defaultSessionId: "gm",
+    },
+    npc: {
+      ambient: {
+        enabled: false,
+      },
+      director: {
+        enabled: true,
+        mode: "nearby",
+        allowAmbientTalk: true,
+        allowNpcToNpc: true,
+        playerNearbyFt: 30,
+        maxChainTurns: 2,
+        maxParticipants: 3,
+        npcCooldownMs: 60000,
+        sceneCooldownMs: 60000,
+        tokenBudgetPerWindow: 8,
+        tokenBudgetWindowMs: 600000,
+        lineDelayMinMs: 0,
+        lineDelayMaxMs: 0,
+      },
+    },
+    npcs: [barkeep],
+  };
+
+  const speaks = [];
+  const client = {
+    config: {
+      foundry: {
+        actorId: "",
+        actorName: "",
+      },
+    },
+    async ensureConnected() {
+      return { ok: true };
+    },
+    async getRecentChat() {
+      return { ok: true, messages: [] };
+    },
+    async getActorSheet() {
+      return { ok: true, actorName: this.config.foundry.actorName };
+    },
+    async speakAsActor(text) {
+      speaks.push(String(text || ""));
+      return { ok: true };
+    },
+  };
+
+  runtime.fvtt = client;
+  runtime.fvttDefaultSessionId = "gm";
+  runtime.fvttSessionConfigs = [{ sessionId: "gm", userId: "", username: "GM" }];
+  runtime.fvttClientsBySessionId = new Map([["gm", client]]);
+  runtime._getTacticalSceneContext = async () => makeScene(8);
+  runtime._completeNpcJson = async () => {
+    throw new Error("ambient generation should not run while ambient is disabled");
+  };
+
+  await runtime._pollAmbientChatter(config);
+
+  assert.deepEqual(speaks, []);
 });

@@ -56,6 +56,10 @@ function ensureString(value, fallback = "") {
   return String(value ?? fallback).trim();
 }
 
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value || {}, key);
+}
+
 function clampInt(value, fallback, min = 64, max = 4096) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -167,54 +171,301 @@ function resolveNpcFoundrySessionId({ npc, sessionConfigs = [], defaultSessionId
   return ensureString(defaultSessionId || pool[0]?.sessionId || "");
 }
 
-function normalizeGlobalDirectorConfig(config) {
-  const npcCfg = isPlainObject(config?.npc) ? config.npc : {};
-  const director = isPlainObject(npcCfg?.director) ? npcCfg.director : {};
-  const minDelay = clampNonNegativeInt(director.lineDelayMinMs, 300, 30_000);
-  const maxDelayRaw = clampNonNegativeInt(director.lineDelayMaxMs, 900, 60_000);
+function normalizeDirectorSnapshot(rawDirector, fallback = null) {
+  const director = isPlainObject(rawDirector) ? rawDirector : {};
+  const base = isPlainObject(fallback) ? fallback : {};
+  const minDelay = clampNonNegativeInt(
+    hasOwn(director, "lineDelayMinMs") ? director.lineDelayMinMs : base.lineDelayMinMs,
+    clampNonNegativeInt(base.lineDelayMinMs, 300, 30_000),
+    30_000
+  );
+  const maxDelayRaw = clampNonNegativeInt(
+    hasOwn(director, "lineDelayMaxMs") ? director.lineDelayMaxMs : base.lineDelayMaxMs,
+    Math.max(minDelay, clampNonNegativeInt(base.lineDelayMaxMs, 900, 60_000)),
+    60_000
+  );
   const maxDelay = Math.max(minDelay, maxDelayRaw);
   return {
-    enabled: director.enabled === true,
-    mode: normalizeDirectorMode(director.mode),
-    promptFile: ensureString(director.promptFile || director.promptPath || ""),
-    promptText: String(director.promptText || ""),
-    allowAmbientTalk: director.allowAmbientTalk !== false,
-    allowNpcToNpc: director.allowNpcToNpc !== false,
-    playerNearbyFt: clampNonNegativeInt(director.playerNearbyFt, 30, 10_000),
-    maxChainTurns: clampNonNegativeInt(director.maxChainTurns, 2, 16),
-    maxParticipants: Math.max(1, clampNonNegativeInt(director.maxParticipants, 3, 16)),
-    npcCooldownMs: clampNonNegativeInt(director.npcCooldownMs, 45_000, 86_400_000),
-    sceneCooldownMs: clampNonNegativeInt(director.sceneCooldownMs, 15_000, 86_400_000),
-    tokenBudgetPerWindow: clampNonNegativeInt(director.tokenBudgetPerWindow, 8, 10_000),
-    tokenBudgetWindowMs: clampNonNegativeInt(director.tokenBudgetWindowMs, 600_000, 86_400_000),
+    enabled: hasOwn(director, "enabled") ? director.enabled === true : base.enabled === true,
+    mode:
+      hasOwn(director, "mode") || hasOwn(director, "type")
+        ? normalizeDirectorMode(director.mode || director.type)
+        : normalizeDirectorMode(base.mode),
+    promptFile:
+      hasOwn(director, "promptFile") || hasOwn(director, "promptPath")
+        ? ensureString(director.promptFile || director.promptPath || "")
+        : ensureString(base.promptFile || base.promptPath || ""),
+    promptText: hasOwn(director, "promptText") ? String(director.promptText || "") : String(base.promptText || ""),
+    allowAmbientTalk:
+      hasOwn(director, "allowAmbientTalk") ? director.allowAmbientTalk !== false : base.allowAmbientTalk !== false,
+    allowNpcToNpc:
+      hasOwn(director, "allowNpcToNpc") ? director.allowNpcToNpc !== false : base.allowNpcToNpc !== false,
+    playerNearbyFt: clampNonNegativeInt(
+      hasOwn(director, "playerNearbyFt") ? director.playerNearbyFt : base.playerNearbyFt,
+      clampNonNegativeInt(base.playerNearbyFt, 30, 10_000),
+      10_000
+    ),
+    maxChainTurns: clampNonNegativeInt(
+      hasOwn(director, "maxChainTurns") ? director.maxChainTurns : base.maxChainTurns,
+      clampNonNegativeInt(base.maxChainTurns, 2, 16),
+      16
+    ),
+    maxParticipants: Math.max(
+      1,
+      clampNonNegativeInt(
+        hasOwn(director, "maxParticipants") ? director.maxParticipants : base.maxParticipants,
+        clampNonNegativeInt(base.maxParticipants, 3, 16),
+        16
+      )
+    ),
+    npcCooldownMs: clampNonNegativeInt(
+      hasOwn(director, "npcCooldownMs") ? director.npcCooldownMs : base.npcCooldownMs,
+      clampNonNegativeInt(base.npcCooldownMs, 45_000, 86_400_000),
+      86_400_000
+    ),
+    sceneCooldownMs: clampNonNegativeInt(
+      hasOwn(director, "sceneCooldownMs") ? director.sceneCooldownMs : base.sceneCooldownMs,
+      clampNonNegativeInt(base.sceneCooldownMs, 15_000, 86_400_000),
+      86_400_000
+    ),
+    tokenBudgetPerWindow: clampNonNegativeInt(
+      hasOwn(director, "tokenBudgetPerWindow") ? director.tokenBudgetPerWindow : base.tokenBudgetPerWindow,
+      clampNonNegativeInt(base.tokenBudgetPerWindow, 8, 10_000),
+      10_000
+    ),
+    tokenBudgetWindowMs: clampNonNegativeInt(
+      hasOwn(director, "tokenBudgetWindowMs") ? director.tokenBudgetWindowMs : base.tokenBudgetWindowMs,
+      clampNonNegativeInt(base.tokenBudgetWindowMs, 600_000, 86_400_000),
+      86_400_000
+    ),
     lineDelayMinMs: minDelay,
     lineDelayMaxMs: maxDelay,
   };
 }
 
-function resolveDirectorConfig({ config, npc } = {}) {
-  const base = normalizeGlobalDirectorConfig(config);
-  const npcDirector = isPlainObject(npc?.director) ? npc.director : {};
-  const enabledOverride = normalizeOptionalBool(npcDirector.enabled);
-  const ambientOverride = normalizeOptionalBool(npcDirector.allowAmbientTalk);
-  const npcToNpcOverride = normalizeOptionalBool(npcDirector.allowNpcToNpc);
+function normalizeGlobalDirectorConfig(config) {
+  const npcCfg = isPlainObject(config?.npc) ? config.npc : {};
+  const director = isPlainObject(npcCfg?.director) ? npcCfg.director : {};
+  return normalizeDirectorSnapshot(director);
+}
+
+function normalizeAmbientSnapshot(rawAmbient, fallback = null, legacyDirector = null) {
+  const ambient = isPlainObject(rawAmbient) ? rawAmbient : {};
+  const base = isPlainObject(fallback) ? fallback : {};
+  const legacyEnabled = legacyDirector?.enabled === true && legacyDirector?.allowAmbientTalk !== false;
   return {
-    ...base,
-    enabled: enabledOverride === null ? base.enabled : enabledOverride,
-    allowAmbientTalk: ambientOverride === null ? base.allowAmbientTalk : ambientOverride,
-    allowNpcToNpc: npcToNpcOverride === null ? base.allowNpcToNpc : npcToNpcOverride,
-    playerNearbyFt: Number.isFinite(Number(npcDirector.playerNearbyFt))
-      ? Math.max(0, Number(npcDirector.playerNearbyFt))
-      : base.playerNearbyFt,
-    npcCooldownMs: Number.isFinite(Number(npcDirector.npcCooldownMs))
-      ? Math.max(0, Number(npcDirector.npcCooldownMs))
-      : base.npcCooldownMs,
-    socialWeight: Number.isFinite(Number(npcDirector.socialWeight))
-      ? Math.max(0, Math.min(10, Number(npcDirector.socialWeight)))
-      : 1,
-    promptFile: ensureString(npcDirector.promptFile || base.promptFile || ""),
-    promptText: String(npcDirector.promptText || base.promptText || ""),
+    enabled: hasOwn(ambient, "enabled") ? ambient.enabled === true : hasOwn(base, "enabled") ? base.enabled === true : legacyEnabled,
+    promptFile:
+      hasOwn(ambient, "promptFile") || hasOwn(ambient, "promptPath")
+        ? ensureString(ambient.promptFile || ambient.promptPath || "")
+        : ensureString(base.promptFile || base.promptPath || ""),
+    promptText: hasOwn(ambient, "promptText") ? String(ambient.promptText || "") : String(base.promptText || ""),
   };
+}
+
+function normalizeGlobalAmbientConfig(config) {
+  const npcCfg = isPlainObject(config?.npc) ? config.npc : {};
+  const legacyDirector = normalizeGlobalDirectorConfig(config);
+  return normalizeAmbientSnapshot(npcCfg?.ambient, null, legacyDirector);
+}
+
+function normalizeNpcDirectorOverride(rawDirector) {
+  const npcDirector = isPlainObject(rawDirector) ? rawDirector : {};
+  return {
+    enabled: normalizeOptionalBool(npcDirector.enabled),
+    allowAmbientTalk: normalizeOptionalBool(npcDirector.allowAmbientTalk),
+    allowNpcToNpc: normalizeOptionalBool(npcDirector.allowNpcToNpc),
+    socialWeight: Number.isFinite(Number(npcDirector.socialWeight)) ? Number(npcDirector.socialWeight) : 1,
+    playerNearbyFt: Number.isFinite(Number(npcDirector.playerNearbyFt)) ? Number(npcDirector.playerNearbyFt) : null,
+    npcCooldownMs: Number.isFinite(Number(npcDirector.npcCooldownMs)) ? Number(npcDirector.npcCooldownMs) : null,
+    promptFile: String(npcDirector.promptFile || ""),
+    promptText: String(npcDirector.promptText || ""),
+  };
+}
+
+function normalizeSocialScenePreset(rawPreset, index = 0, { directorFallback = null, ambientFallback = null } = {}) {
+  const preset = isPlainObject(rawPreset) ? rawPreset : {};
+  const directorBase = normalizeDirectorSnapshot(directorFallback);
+  const ambientBase = normalizeAmbientSnapshot(ambientFallback, null, directorBase);
+  const npcOverrides = ensureArray(preset.npcOverrides)
+    .map((rawOverride, overrideIndex) => {
+      const override = isPlainObject(rawOverride) ? rawOverride : {};
+      const npcId = ensureString(override.npcId || override.id || override.npc || override.name || `npc-${overrideIndex + 1}`);
+      return {
+        npcId,
+        displayName: ensureString(override.displayName || override.name || npcId),
+        director: normalizeNpcDirectorOverride(override.director || override),
+      };
+    })
+    .filter((override) => Boolean(override.npcId));
+
+  return {
+    id: ensureString(preset.id || preset.presetId || `scene-preset-${index + 1}`) || `scene-preset-${index + 1}`,
+    label:
+      ensureString(preset.label || preset.name || preset.sceneName || preset.mapName || preset.sceneId || preset.mapId || "") ||
+      `Scene Preset ${index + 1}`,
+    sceneId: ensureString(preset.sceneId || preset.mapId || ""),
+    sceneName: ensureString(preset.sceneName || preset.mapName || ""),
+    worldStateText: String(preset.worldStateText || preset.worldSetupText || ""),
+    director: normalizeDirectorSnapshot(preset.director, directorBase),
+    ambient: normalizeAmbientSnapshot(preset.ambient, ambientBase, directorBase),
+    npcOverrides,
+  };
+}
+
+function normalizeScenePresetList(config) {
+  const npcCfg = isPlainObject(config?.npc) ? config.npc : {};
+  const directorFallback = normalizeGlobalDirectorConfig(config);
+  const ambientFallback = normalizeGlobalAmbientConfig(config);
+  const presetList = Array.isArray(npcCfg.scenePresets)
+    ? npcCfg.scenePresets
+    : Array.isArray(npcCfg.mapPresets)
+      ? npcCfg.mapPresets
+      : [];
+  return ensureArray(presetList).map((preset, index) =>
+    normalizeSocialScenePreset(preset, index, {
+      directorFallback,
+      ambientFallback,
+    })
+  );
+}
+
+function resolveSocialScenePreset({ config, sceneContext } = {}) {
+  const sceneId = ensureString(sceneContext?.scene?.id || "");
+  const sceneName = ensureString(sceneContext?.scene?.name || "");
+  if (!sceneId && !sceneName) return null;
+
+  const wantedId = safeLower(sceneId);
+  const wantedName = normalizeTokenKey(sceneName) || safeLower(sceneName);
+  const presets = normalizeScenePresetList(config);
+  let fallback = null;
+  for (const preset of presets) {
+    const presetId = safeLower(preset.sceneId);
+    const presetName = normalizeTokenKey(preset.sceneName) || safeLower(preset.sceneName);
+    if (wantedId && presetId && wantedId === presetId) return preset;
+    if (!fallback && wantedName && presetName && wantedName === presetName) {
+      fallback = preset;
+    }
+  }
+  return fallback;
+}
+
+function resolvePresetNpcOverride({ preset, npc } = {}) {
+  const overrides = ensureArray(preset?.npcOverrides);
+  if (!overrides.length) return null;
+  const keys = new Set(
+    [npc?.id, npc?.displayName, npc?.actor?.value]
+      .map((value) => normalizeTokenKey(value))
+      .filter(Boolean)
+  );
+  return (
+    overrides.find((override) => {
+      const overrideKey = normalizeTokenKey(override?.npcId || override?.displayName || "");
+      return overrideKey && keys.has(overrideKey);
+    }) || null
+  );
+}
+
+function applyNpcDirectorOverride(baseConfig, rawOverride) {
+  const out = { ...(isPlainObject(baseConfig) ? baseConfig : {}) };
+  const override = isPlainObject(rawOverride) ? rawOverride : {};
+  const enabledOverride = normalizeOptionalBool(override.enabled);
+  const ambientOverride = normalizeOptionalBool(override.allowAmbientTalk);
+  const npcToNpcOverride = normalizeOptionalBool(override.allowNpcToNpc);
+  if (enabledOverride !== null) out.enabled = enabledOverride;
+  if (ambientOverride !== null) out.allowAmbientTalk = ambientOverride;
+  if (npcToNpcOverride !== null) out.allowNpcToNpc = npcToNpcOverride;
+  if (Number.isFinite(Number(override.playerNearbyFt))) out.playerNearbyFt = Math.max(0, Number(override.playerNearbyFt));
+  if (Number.isFinite(Number(override.npcCooldownMs))) out.npcCooldownMs = Math.max(0, Number(override.npcCooldownMs));
+  if (Number.isFinite(Number(override.socialWeight))) {
+    out.socialWeight = Math.max(0, Math.min(10, Number(override.socialWeight)));
+  }
+  const promptFile = ensureString(override.promptFile || "");
+  if (promptFile) out.promptFile = promptFile;
+  const promptText = String(override.promptText || "").trim();
+  if (promptText) out.promptText = promptText;
+  return out;
+}
+
+function resolveAmbientConfig({ config, sceneContext } = {}) {
+  const globalAmbient = normalizeGlobalAmbientConfig(config);
+  const preset = resolveSocialScenePreset({ config, sceneContext });
+  if (!preset?.ambient) return globalAmbient;
+  return normalizeAmbientSnapshot(preset.ambient, globalAmbient, preset.director || normalizeGlobalDirectorConfig(config));
+}
+
+function resolveWorldStateText({ config, sceneContext } = {}) {
+  const npcCfg = isPlainObject(config?.npc) ? config.npc : {};
+  const preset = resolveSocialScenePreset({ config, sceneContext });
+  if (preset) {
+    return {
+      preset,
+      text: String(preset.worldStateText || ""),
+    };
+  }
+  return {
+    preset: null,
+    text: String(npcCfg.worldStateText || ""),
+  };
+}
+
+function parseWorldStateText(text) {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => String(line || "").trim())
+    .filter(Boolean);
+  const general = [];
+  const npcEntries = [];
+  const byNpcKey = new Map();
+
+  for (const line of lines) {
+    const match = line.match(/^@(.+?)\s*[:：-]\s*(.+)$/);
+    if (!match) {
+      general.push(line);
+      continue;
+    }
+    const target = ensureString(match[1] || "");
+    const note = ensureString(match[2] || "");
+    if (!target || !note) continue;
+    const key = normalizeTokenKey(target);
+    if (!key) continue;
+    const previous = ensureString(byNpcKey.get(key) || "");
+    const merged = previous ? `${previous} / ${note}` : note;
+    byNpcKey.set(key, merged);
+    npcEntries.push({ key, target, text: note });
+  }
+
+  return {
+    generalText: general.join("\n"),
+    npcEntries,
+    byNpcKey,
+  };
+}
+
+function resolveNpcWorldState({ config, npc, sceneContext } = {}) {
+  const { preset, text } = resolveWorldStateText({ config, sceneContext });
+  const parsed = parseWorldStateText(text);
+  const npcKey = normalizeTokenKey(npc?.displayName || npc?.id || npc?.actor?.value || "");
+  return {
+    presetId: ensureString(preset?.id || ""),
+    presetLabel: ensureString(preset?.label || ""),
+    generalText: parsed.generalText,
+    entries: parsed.npcEntries,
+    npcActivity: ensureString(parsed.byNpcKey.get(npcKey) || ""),
+  };
+}
+
+function resolveDirectorConfig({ config, npc, sceneContext } = {}) {
+  let base = normalizeGlobalDirectorConfig(config);
+  const preset = resolveSocialScenePreset({ config, sceneContext });
+  if (preset?.director) {
+    base = normalizeDirectorSnapshot(preset.director, base);
+  }
+  const presetOverride = resolvePresetNpcOverride({ preset, npc });
+  if (presetOverride?.director) {
+    base = applyNpcDirectorOverride(base, presetOverride.director);
+  }
+  return applyNpcDirectorOverride(base, npc?.director);
 }
 
 function normalizeNpcImageGenerationState({ config, npc } = {}) {
@@ -463,8 +714,15 @@ async function loadNpcPromptDocs({ config, npc }) {
   return sharedWorld || persona || "";
 }
 
-async function loadDirectorPromptText({ config, npc } = {}) {
-  const resolved = resolveDirectorConfig({ config, npc });
+async function loadDirectorPromptText({ config, npc, sceneContext = null } = {}) {
+  const resolved = resolveDirectorConfig({ config, npc, sceneContext });
+  const inline = String(resolved.promptText || "").trim();
+  if (inline) return inline;
+  return readMaybe(resolved.promptFile);
+}
+
+async function loadAmbientPromptText({ config, sceneContext = null } = {}) {
+  const resolved = resolveAmbientConfig({ config, sceneContext });
   const inline = String(resolved.promptText || "").trim();
   if (inline) return inline;
   return readMaybe(resolved.promptFile);
@@ -537,6 +795,8 @@ function buildDirectorPlannerPrompt({
   followUpLimit = 0,
   directorConfig = null,
   directorPromptText = "",
+  scenePresetLabel = "",
+  scenePrepText = "",
   candidates = [],
 } = {}) {
   const primaryNpcName = String(primaryNpc?.displayName || primaryNpc?.id || "NPC").trim();
@@ -558,6 +818,8 @@ function buildDirectorPlannerPrompt({
     `- speaker/player hint: ${String(speakerHint || "unknown").trim() || "unknown"}`,
     `- inbound line: ${String(inboundText || "").trim() || "(none)"}`,
     `- first reply already spoken by ${primaryNpcName}: ${String(primaryReplyText || "").trim() || "(silent)"}`,
+    ...(String(scenePresetLabel || "").trim() ? [`- matched scene preset: ${String(scenePresetLabel || "").trim()}`] : []),
+    ...(String(scenePrepText || "").trim() ? [`- scene prep: ${compact(scenePrepText, 260)}`] : []),
     "",
     "Resolved director policy:",
     `- mode: ${String(director.mode || "nearby")}`,
@@ -577,9 +839,10 @@ function buildDirectorPlannerPrompt({
     const npcId = ensureString(candidate?.npc?.id);
     const npcName = ensureString(candidate?.npc?.displayName || candidate?.npc?.id || npcId);
     const note = ensureString(candidate?.personaNote || "");
+    const activity = ensureString(candidate?.worldActivityNote || "");
     const distance = Number(candidate?.sourceDistanceFt);
     lines.push(
-      `- id=${npcId} name=${npcName} distance=${Number.isFinite(distance) ? `${distance}ft` : "unknown"} socialWeight=${Number(candidate?.directorConfig?.socialWeight || 0)} ambient=${candidate?.directorConfig?.allowAmbientTalk ? "yes" : "no"} npcToNpc=${candidate?.directorConfig?.allowNpcToNpc ? "yes" : "no"} note=${note || "(none)"}`
+      `- id=${npcId} name=${npcName} distance=${Number.isFinite(distance) ? `${distance}ft` : "unknown"} socialWeight=${Number(candidate?.directorConfig?.socialWeight || 0)} ambient=${candidate?.directorConfig?.allowAmbientTalk ? "yes" : "no"} npcToNpc=${candidate?.directorConfig?.allowNpcToNpc ? "yes" : "no"} activity=${activity || "(none)"} note=${note || "(none)"}`
     );
   }
 
@@ -1857,6 +2120,9 @@ function buildNpcPrompt({
   imageGeneration = null,
   directorConfig = null,
   directorPromptText = "",
+  ambientConfig = null,
+  ambientPromptText = "",
+  worldState = null,
 }) {
   const npcName = String(npc?.displayName || npc?.id || "NPC");
   const modeText = fvttReady ? "FVTT connected (can act in-world)" : "FVTT offline (chat only)";
@@ -1866,6 +2132,8 @@ function buildNpcPrompt({
       : normalizeNpcImageGenerationState({ config: null, npc });
   const socialDirector =
     directorConfig && typeof directorConfig === "object" ? directorConfig : resolveDirectorConfig({ npc });
+  const ambientState = ambientConfig && typeof ambientConfig === "object" ? ambientConfig : { enabled: false };
+  const socialWorldState = worldState && typeof worldState === "object" ? worldState : {};
 
   const contextLines = ensureArray(fvttChatContext)
     .slice(-10)
@@ -1983,6 +2251,33 @@ function buildNpcPrompt({
 
   if (String(directorPromptText || "").trim()) {
     parts.push("Director prompt:", String(directorPromptText).trim(), "");
+  }
+
+  const worldStateLines = [
+    "World social state:",
+    `- ambient chatter enabled: ${ambientState.enabled ? "yes" : "no"}`,
+  ];
+  if (String(socialWorldState.presetLabel || "").trim()) {
+    worldStateLines.push(`- matched scene preset: ${String(socialWorldState.presetLabel || "").trim()}`);
+  }
+  if (String(socialWorldState.generalText || "").trim()) {
+    worldStateLines.push(`- scene prep: ${compact(String(socialWorldState.generalText || "").trim(), 420)}`);
+  }
+  if (String(socialWorldState.npcActivity || "").trim()) {
+    worldStateLines.push(`- your current activity: ${compact(String(socialWorldState.npcActivity || "").trim(), 220)}`);
+  }
+  const npcSelfKeys = new Set([normalizeTokenKey(npcName), normalizeTokenKey(npc?.id), normalizeTokenKey(npc?.actor?.value)].filter(Boolean));
+  const otherAssignments = ensureArray(socialWorldState.entries)
+    .filter((entry) => entry?.key && !npcSelfKeys.has(String(entry.key)))
+    .slice(0, 6)
+    .map((entry) => `- ${entry.target}: ${compact(entry.text, 140)}`);
+  if (otherAssignments.length) {
+    worldStateLines.push("- other current assignments:", ...otherAssignments);
+  }
+  parts.push(...worldStateLines, "");
+
+  if (String(ambientPromptText || "").trim()) {
+    parts.push("Ambient prompt:", String(ambientPromptText).trim(), "");
   }
 
   if (imageState.enabled) {
@@ -2518,15 +2813,18 @@ class AppRuntime {
     this._directorNpcCooldownUntil.set(key, now + cooldownMs);
   }
 
-  _buildDirectorSceneKey({ origin = "", primaryNpc = null, speakerHint = "", reactionGate = null } = {}) {
+  _buildDirectorSceneKey({ origin = "", primaryNpc = null, speakerHint = "", reactionGate = null, sceneContext = null } = {}) {
     const sessionId = resolveNpcFoundrySessionId({
       npc: primaryNpc,
       sessionConfigs: this.fvttSessionConfigs,
       defaultSessionId: this.fvttDefaultSessionId,
     });
+    const sceneRef =
+      ensureString(sceneContext?.scene?.id || sceneContext?.scene?.name || sceneContext?.actorTokenInOtherScene?.sceneName || "") ||
+      "scene";
     const sourceRef =
       ensureString(reactionGate?.sourceTokenId || reactionGate?.sourceTokenName || speakerHint || primaryNpc?.id || "scene") || "scene";
-    return `${ensureString(origin || "director") || "director"}|${sessionId || "default"}|${normalizeTokenKey(sourceRef) || safeLower(sourceRef) || "scene"}`;
+    return `${ensureString(origin || "director") || "director"}|${sessionId || "default"}|${normalizeTokenKey(sceneRef) || safeLower(sceneRef) || "scene"}|${normalizeTokenKey(sourceRef) || safeLower(sourceRef) || "scene"}`;
   }
 
   _isDirectorSceneCoolingDown(sceneKey, now = Date.now()) {
@@ -2568,11 +2866,6 @@ class AppRuntime {
     for (const candidate of pickEnabledNpcs(config)) {
       const candidateId = ensureString(candidate?.id);
       if (!candidateId || candidateId === primaryId) continue;
-
-      const directorConfig = resolveDirectorConfig({ config, npc: candidate });
-      if (!directorConfig.enabled || directorConfig.mode === "off") continue;
-      if (requireAmbientTalk && !directorConfig.allowAmbientTalk) continue;
-      if (!requireAmbientTalk && !directorConfig.allowAmbientTalk && !directorConfig.allowNpcToNpc) continue;
       if (this._isDirectorNpcCoolingDown(candidateId)) continue;
 
       let sceneContext = null;
@@ -2583,6 +2876,11 @@ class AppRuntime {
         continue;
       }
       if (!sceneContext?.ok) continue;
+
+      const directorConfig = resolveDirectorConfig({ config, npc: candidate, sceneContext });
+      if (!directorConfig.enabled || directorConfig.mode === "off") continue;
+      if (requireAmbientTalk && !directorConfig.allowAmbientTalk) continue;
+      if (!requireAmbientTalk && !directorConfig.allowAmbientTalk && !directorConfig.allowNpcToNpc) continue;
 
       const reactionGate = evaluateNpcReactionDistance({
         npc: candidate,
@@ -2610,6 +2908,7 @@ class AppRuntime {
         npc: candidate,
         directorConfig,
         sceneContext,
+        worldState: resolveNpcWorldState({ config, npc: candidate, sceneContext }),
         reactionGate,
         sourceDistanceFt,
         score: mentionScore + distanceScore + socialScore + npcToNpcScore + ambientScore,
@@ -2647,6 +2946,7 @@ class AppRuntime {
     primaryReplyText,
     inboundText,
     speakerHint,
+    sceneContext = null,
     directorConfig,
     candidatePool,
     runToken = 0,
@@ -2684,11 +2984,13 @@ class AppRuntime {
       trimmedCandidates.map(async (candidate) => ({
         ...candidate,
         personaNote: await loadDirectorPersonaNote(candidate.npc),
+        worldActivityNote: ensureString(candidate?.worldState?.npcActivity || ""),
       }))
     );
     this._throwIfRuntimeStopped(runToken);
 
-    const directorPromptText = await loadDirectorPromptText({ config, npc: primaryNpc });
+    const primaryWorldState = resolveNpcWorldState({ config, npc: primaryNpc, sceneContext });
+    const directorPromptText = await loadDirectorPromptText({ config, npc: primaryNpc, sceneContext });
     const prompt = buildDirectorPlannerPrompt({
       inboundText,
       speakerHint,
@@ -2697,6 +2999,8 @@ class AppRuntime {
       followUpLimit: maxFollowUps,
       directorConfig,
       directorPromptText,
+      scenePresetLabel: primaryWorldState.presetLabel,
+      scenePrepText: primaryWorldState.generalText,
       candidates: candidatesWithNotes,
     });
 
@@ -2745,19 +3049,16 @@ class AppRuntime {
     speakerHint,
     beat,
     conversationLog,
+    sceneContext = null,
     runToken = 0,
   } = {}) {
     const npcName = String(npc?.displayName || npc?.id || "NPC");
-    const directorConfig = resolveDirectorConfig({ config, npc });
-    const [personaText, directorPromptText] = await Promise.all([
-      loadNpcPromptDocs({ config, npc }),
-      loadDirectorPromptText({ config, npc }),
-    ]);
+    const [personaText] = await Promise.all([loadNpcPromptDocs({ config, npc })]);
     this._throwIfRuntimeStopped(runToken);
 
     let fvttReady = false;
     let fvttChatContext = [];
-    let fvttSceneContext = null;
+    let fvttSceneContext = sceneContext;
     let fvttActorSheet = null;
     try {
       const fvttClient = await this._ensureFvttClientForNpc(npc, runToken);
@@ -2765,13 +3066,22 @@ class AppRuntime {
       const chat = await fvttClient.getRecentChat(10);
       if (chat?.ok) fvttChatContext = chat.messages || [];
       this._throwIfRuntimeStopped(runToken);
-      fvttSceneContext = await this._getTacticalSceneContext(npc, 30, runToken);
+      if (!fvttSceneContext?.ok) {
+        fvttSceneContext = await this._getTacticalSceneContext(npc, 30, runToken);
+      }
       fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet(), { runToken });
     } catch (e) {
       if (this._isRuntimeAbortError(e)) throw e;
       this.log.warn("director", `follow-up context failed (${npcName}): ${e?.message || e}`);
       this._trace("director.followup.context.error", { npcId: npc?.id || "", error: e });
     }
+
+    const directorConfig = resolveDirectorConfig({ config, npc, sceneContext: fvttSceneContext });
+    const ambientConfig = resolveAmbientConfig({ config, sceneContext: fvttSceneContext });
+    const worldState = resolveNpcWorldState({ config, npc, sceneContext: fvttSceneContext });
+    const [directorPromptText] = await Promise.all([
+      loadDirectorPromptText({ config, npc, sceneContext: fvttSceneContext }),
+    ]);
 
     const targetNpcName =
       String(
@@ -2802,6 +3112,8 @@ class AppRuntime {
       imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
       directorConfig,
       directorPromptText,
+      ambientConfig,
+      worldState,
     });
 
     try {
@@ -2842,15 +3154,16 @@ class AppRuntime {
     speakerHint = "",
     reactionGate = null,
     discordMessage = null,
+    sceneContext = null,
     skipInitialSceneCooldownCheck = false,
     runToken = 0,
   } = {}) {
     if (!primaryNpc) return;
-    const directorConfig = resolveDirectorConfig({ config, npc: primaryNpc });
+    const directorConfig = resolveDirectorConfig({ config, npc: primaryNpc, sceneContext });
     if (!directorConfig.enabled || directorConfig.mode === "off") return;
     if (!(Number(directorConfig.maxChainTurns) > 0) || !(Number(directorConfig.maxParticipants) > 1)) return;
 
-    const sceneKey = this._buildDirectorSceneKey({ origin, primaryNpc, speakerHint, reactionGate });
+    const sceneKey = this._buildDirectorSceneKey({ origin, primaryNpc, speakerHint, reactionGate, sceneContext });
     if (!skipInitialSceneCooldownCheck && sceneKey && this._isDirectorSceneCoolingDown(sceneKey)) {
       this._trace("director.scene.skip", {
         reason: "scene-cooldown",
@@ -2876,6 +3189,7 @@ class AppRuntime {
       primaryReplyText,
       inboundText,
       speakerHint,
+      sceneContext,
       directorConfig,
       candidatePool,
       runToken,
@@ -2927,6 +3241,7 @@ class AppRuntime {
         speakerHint,
         beat,
         conversationLog,
+        sceneContext: candidate.sceneContext || sceneContext,
         runToken,
       });
       this._throwIfRuntimeStopped(runToken);
@@ -2982,8 +3297,6 @@ class AppRuntime {
   async _pickAmbientChatterLead({ config, runToken = 0 } = {}) {
     const candidates = [];
     for (const npc of pickEnabledNpcs(config)) {
-      const directorConfig = resolveDirectorConfig({ config, npc });
-      if (!directorConfig.enabled || directorConfig.mode === "off" || !directorConfig.allowAmbientTalk) continue;
       if (this._isDirectorNpcCoolingDown(npc?.id)) continue;
 
       let sceneContext = null;
@@ -2995,6 +3308,11 @@ class AppRuntime {
       }
       if (!sceneContext?.ok) continue;
 
+      const ambientConfig = resolveAmbientConfig({ config, sceneContext });
+      if (!ambientConfig.enabled) continue;
+      const directorConfig = resolveDirectorConfig({ config, npc, sceneContext });
+      if (!directorConfig.enabled || directorConfig.mode === "off" || !directorConfig.allowAmbientTalk) continue;
+
       const audienceToken = pickAmbientAudienceFromSceneContext(sceneContext, directorConfig.playerNearbyFt);
       if (!audienceToken?.id) continue;
       const distance = Number.isFinite(Number(audienceToken.orthDistanceFt))
@@ -3004,7 +3322,9 @@ class AppRuntime {
       candidates.push({
         npc,
         directorConfig,
+        ambientConfig,
         sceneContext,
+        worldState: resolveNpcWorldState({ config, npc, sceneContext }),
         audienceToken,
         score,
       });
@@ -3028,18 +3348,16 @@ class AppRuntime {
     return candidates[0] || null;
   }
 
-  async _generateAmbientChatterText({ config, npc, audienceToken, runToken = 0 } = {}) {
+  async _generateAmbientChatterText({ config, npc, audienceToken, sceneContext = null, runToken = 0 } = {}) {
     const npcName = String(npc?.displayName || npc?.id || "NPC");
-    const directorConfig = resolveDirectorConfig({ config, npc });
-    const [personaText, directorPromptText] = await Promise.all([
+    const [personaText] = await Promise.all([
       loadNpcPromptDocs({ config, npc }),
-      loadDirectorPromptText({ config, npc }),
     ]);
     this._throwIfRuntimeStopped(runToken);
 
     let fvttReady = false;
     let fvttChatContext = [];
-    let fvttSceneContext = null;
+    let fvttSceneContext = sceneContext;
     let fvttActorSheet = null;
     try {
       const fvttClient = await this._ensureFvttClientForNpc(npc, runToken);
@@ -3047,13 +3365,23 @@ class AppRuntime {
       const chat = await fvttClient.getRecentChat(10);
       if (chat?.ok) fvttChatContext = chat.messages || [];
       this._throwIfRuntimeStopped(runToken);
-      fvttSceneContext = await this._getTacticalSceneContext(npc, 30, runToken);
+      if (!fvttSceneContext?.ok) {
+        fvttSceneContext = await this._getTacticalSceneContext(npc, 30, runToken);
+      }
       fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet(), { runToken });
     } catch (e) {
       if (this._isRuntimeAbortError(e)) throw e;
       this.log.warn("ambient", `context failed (${npcName}): ${e?.message || e}`);
       this._trace("ambient.context.error", { npcId: npc?.id || "", error: e });
     }
+
+    const directorConfig = resolveDirectorConfig({ config, npc, sceneContext: fvttSceneContext });
+    const ambientConfig = resolveAmbientConfig({ config, sceneContext: fvttSceneContext });
+    const worldState = resolveNpcWorldState({ config, npc, sceneContext: fvttSceneContext });
+    const [directorPromptText, ambientPromptText] = await Promise.all([
+      loadDirectorPromptText({ config, npc, sceneContext: fvttSceneContext }),
+      loadAmbientPromptText({ config, sceneContext: fvttSceneContext }),
+    ]);
 
     const prompt = buildNpcPrompt({
       npc,
@@ -3067,6 +3395,9 @@ class AppRuntime {
       imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
       directorConfig,
       directorPromptText,
+      ambientConfig,
+      ambientPromptText,
+      worldState,
     });
 
     try {
@@ -3123,6 +3454,7 @@ class AppRuntime {
         primaryNpc: lead.npc,
         speakerHint: reactionGate.sourceTokenName,
         reactionGate,
+        sceneContext: lead.sceneContext,
       });
       if (sceneKey && this._isDirectorSceneCoolingDown(sceneKey)) return;
       if (!this._tryReserveDirectorBudget(lead.directorConfig, 1)) {
@@ -3137,6 +3469,7 @@ class AppRuntime {
         config,
         npc: lead.npc,
         audienceToken: lead.audienceToken,
+        sceneContext: lead.sceneContext,
         runToken,
       });
       this._throwIfRuntimeStopped(runToken);
@@ -3159,6 +3492,7 @@ class AppRuntime {
         inboundText: `Quiet idle scene near ${reactionGate.sourceTokenName || "the party"}.`,
         speakerHint: reactionGate.sourceTokenName,
         reactionGate,
+        sceneContext: lead.sceneContext,
         skipInitialSceneCooldownCheck: true,
         runToken,
       });
@@ -3838,7 +4172,6 @@ class AppRuntime {
     const npcName = String(npc?.displayName || npc?.id || "NPC");
     const turnKey = String(combatState?.turnKey || "").trim();
     let text = buildCombatTurnInboundText({ npcName, combatState });
-    const directorConfig = resolveDirectorConfig({ config, npc });
 
     this._trace("fvtt.combat.turn.handle.start", {
       npcId: npc?.id || "",
@@ -3847,10 +4180,7 @@ class AppRuntime {
       text,
     });
 
-    const [personaText, directorPromptText] = await Promise.all([
-      loadNpcPromptDocs({ config, npc }),
-      loadDirectorPromptText({ config, npc }),
-    ]);
+    const [personaText] = await Promise.all([loadNpcPromptDocs({ config, npc })]);
     this._throwIfRuntimeStopped(runToken);
 
     let fvttChatContext = [];
@@ -3888,6 +4218,10 @@ class AppRuntime {
       actorSheet: fvttActorSheet,
       sceneContext: fvttSceneContext,
     });
+    const directorConfig = resolveDirectorConfig({ config, npc, sceneContext: fvttSceneContext });
+    const ambientConfig = resolveAmbientConfig({ config, sceneContext: fvttSceneContext });
+    const worldState = resolveNpcWorldState({ config, npc, sceneContext: fvttSceneContext });
+    const directorPromptText = await loadDirectorPromptText({ config, npc, sceneContext: fvttSceneContext });
 
     const prompt = buildNpcPrompt({
       npc,
@@ -3901,6 +4235,8 @@ class AppRuntime {
       imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
       directorConfig,
       directorPromptText,
+      ambientConfig,
+      worldState,
     });
 
     let replyText = "";
@@ -4156,7 +4492,6 @@ class AppRuntime {
   async _handleNpcCombatEnd({ config, npc, prevCombatState, combatState, runToken = 0 }) {
     this._throwIfRuntimeStopped(runToken);
     const npcName = String(npc?.displayName || npc?.id || "NPC");
-    const directorConfig = resolveDirectorConfig({ config, npc });
     this._trace("fvtt.combat.end.handle.start", {
       npcId: npc?.id || "",
       npcName,
@@ -4164,10 +4499,7 @@ class AppRuntime {
       combatState: combatState || null,
     });
 
-    const [personaText, directorPromptText] = await Promise.all([
-      loadNpcPromptDocs({ config, npc }),
-      loadDirectorPromptText({ config, npc }),
-    ]);
+    const [personaText] = await Promise.all([loadNpcPromptDocs({ config, npc })]);
     this._throwIfRuntimeStopped(runToken);
     let fvttChatContext = [];
     let fvttSceneContext = null;
@@ -4192,6 +4524,10 @@ class AppRuntime {
       combatState,
       actorSheet: fvttActorSheet,
     });
+    const directorConfig = resolveDirectorConfig({ config, npc, sceneContext: fvttSceneContext });
+    const ambientConfig = resolveAmbientConfig({ config, sceneContext: fvttSceneContext });
+    const worldState = resolveNpcWorldState({ config, npc, sceneContext: fvttSceneContext });
+    const directorPromptText = await loadDirectorPromptText({ config, npc, sceneContext: fvttSceneContext });
 
     const prompt = buildNpcPrompt({
       npc,
@@ -4205,6 +4541,8 @@ class AppRuntime {
       imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
       directorConfig,
       directorPromptText,
+      ambientConfig,
+      worldState,
     });
 
     let replyText = "";
@@ -4267,7 +4605,6 @@ class AppRuntime {
   async _handleNpcFvttInbound({ config, npc, speaker, text, runToken = 0 }) {
     this._throwIfRuntimeStopped(runToken);
     const npcName = String(npc?.displayName || npc?.id || "NPC");
-    const directorConfig = resolveDirectorConfig({ config, npc });
     this.log.info("fvtt", `inbound -> ${npcName} (speaker=${speaker || "?"}): ${compact(text, 180)}`);
     this._trace("fvtt.inbound.handle.start", {
       npcId: npc?.id || "",
@@ -4276,10 +4613,7 @@ class AppRuntime {
       text: String(text || ""),
     });
 
-    const [personaText, directorPromptText] = await Promise.all([
-      loadNpcPromptDocs({ config, npc }),
-      loadDirectorPromptText({ config, npc }),
-    ]);
+    const [personaText] = await Promise.all([loadNpcPromptDocs({ config, npc })]);
     this._throwIfRuntimeStopped(runToken);
 
     // Build FVTT-only context for LLM
@@ -4345,6 +4679,11 @@ class AppRuntime {
       return;
     }
 
+    const directorConfig = resolveDirectorConfig({ config, npc, sceneContext: fvttSceneContext });
+    const ambientConfig = resolveAmbientConfig({ config, sceneContext: fvttSceneContext });
+    const worldState = resolveNpcWorldState({ config, npc, sceneContext: fvttSceneContext });
+    const directorPromptText = await loadDirectorPromptText({ config, npc, sceneContext: fvttSceneContext });
+
     const prompt = buildNpcPrompt({
       npc,
       inboundText: text,
@@ -4357,6 +4696,8 @@ class AppRuntime {
       imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
       directorConfig,
       directorPromptText,
+      ambientConfig,
+      worldState,
     });
 
     let replyText = "";
@@ -4472,6 +4813,7 @@ class AppRuntime {
           inboundText: text,
           speakerHint: speaker,
           reactionGate,
+          sceneContext: fvttSceneContext,
           runToken,
         });
       } catch (e) {
@@ -5392,7 +5734,6 @@ class AppRuntime {
   async _handleNpcDiscordMessage({ config, npc, message, text, runToken = 0 }) {
     this._throwIfRuntimeStopped(runToken);
     const npcName = String(npc?.displayName || npc?.id || "NPC");
-    const directorConfig = resolveDirectorConfig({ config, npc });
     this.log.info("discord", `inbound -> ${npcName}: ${compact(text, 180)}`);
     this._trace("discord.handle.start", {
       npcId: npc?.id || "",
@@ -5511,15 +5852,16 @@ class AppRuntime {
       return;
     }
 
-    const [personaText, directorPromptText] = await Promise.all([
-      loadNpcPromptDocs({ config, npc }),
-      loadDirectorPromptText({ config, npc }),
-    ]);
+    const [personaText] = await Promise.all([loadNpcPromptDocs({ config, npc })]);
     this._throwIfRuntimeStopped(runToken);
 
     let replyText = "";
     let intent = { type: "none", args: {} };
     let strictExecution = false;
+    const directorConfig = resolveDirectorConfig({ config, npc, sceneContext: fvttSceneContext });
+    const ambientConfig = resolveAmbientConfig({ config, sceneContext: fvttSceneContext });
+    const worldState = resolveNpcWorldState({ config, npc, sceneContext: fvttSceneContext });
+    const directorPromptText = await loadDirectorPromptText({ config, npc, sceneContext: fvttSceneContext });
 
     const prompt = buildNpcPrompt({
       npc,
@@ -5533,6 +5875,8 @@ class AppRuntime {
       imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
       directorConfig,
       directorPromptText,
+      ambientConfig,
+      worldState,
     });
 
     try {
@@ -5684,6 +6028,7 @@ class AppRuntime {
           speakerHint,
           reactionGate,
           discordMessage: message,
+          sceneContext: fvttSceneContext,
           runToken,
         });
       } catch (e) {
@@ -6290,7 +6635,9 @@ class AppRuntime {
 module.exports = {
   AppRuntime,
   collectFoundrySessionConfigs,
+  resolveAmbientConfig,
   resolveDirectorConfig,
+  resolveNpcWorldState,
   resolveNpcFoundrySessionId,
 };
 

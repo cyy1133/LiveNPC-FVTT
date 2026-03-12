@@ -3,7 +3,9 @@ const assert = require("node:assert/strict");
 
 const {
   AppRuntime,
+  resolveAmbientConfig,
   resolveDirectorConfig,
+  resolveNpcWorldState,
   resolveNpcFoundrySessionId,
 } = require("../runtime/app-runtime");
 
@@ -53,6 +55,84 @@ test("smoke: director config uses global defaults and NPC overrides", () => {
   assert.equal(resolved.npcCooldownMs, 9000);
   assert.equal(resolved.sceneCooldownMs, 15000);
   assert.equal(resolved.socialWeight, 2.5);
+});
+
+test("smoke: scene preset overrides ambient/director config and resolves @npc world activity", () => {
+  const config = {
+    npc: {
+      director: {
+        enabled: false,
+        mode: "nearby",
+        allowAmbientTalk: true,
+        allowNpcToNpc: false,
+      },
+      ambient: {
+        enabled: false,
+        promptText: "Global ambient off.",
+      },
+      worldStateText: "@Town Guard: standing watch in the square",
+      scenePresets: [
+        {
+          id: "tavern-night",
+          label: "Tavern Night",
+          sceneName: "Rusty Dragon Inn",
+          worldStateText: "@Town Guard: watching the tavern door\n@Barkeep: polishing mugs",
+          director: {
+            enabled: true,
+            mode: "directed",
+            allowAmbientTalk: true,
+            allowNpcToNpc: true,
+            playerNearbyFt: 24,
+            maxChainTurns: 1,
+            maxParticipants: 2,
+            npcCooldownMs: 12000,
+            sceneCooldownMs: 8000,
+            tokenBudgetPerWindow: 4,
+            tokenBudgetWindowMs: 120000,
+            lineDelayMinMs: 0,
+            lineDelayMaxMs: 0,
+          },
+          ambient: {
+            enabled: true,
+            promptText: "Keep idle chatter short.",
+          },
+          npcOverrides: [
+            {
+              npcId: "guard",
+              director: {
+                socialWeight: 3,
+              },
+            },
+          ],
+        },
+      ],
+    },
+  };
+
+  const npc = {
+    id: "guard",
+    displayName: "Town Guard",
+    director: {},
+  };
+  const sceneContext = {
+    scene: {
+      id: "scene-123",
+      name: "Rusty Dragon Inn",
+    },
+  };
+
+  const director = resolveDirectorConfig({ config, npc, sceneContext });
+  const ambient = resolveAmbientConfig({ config, sceneContext });
+  const worldState = resolveNpcWorldState({ config, npc, sceneContext });
+
+  assert.equal(director.enabled, true);
+  assert.equal(director.mode, "directed");
+  assert.equal(director.allowNpcToNpc, true);
+  assert.equal(director.socialWeight, 3);
+  assert.equal(ambient.enabled, true);
+  assert.equal(ambient.promptText, "Keep idle chatter short.");
+  assert.equal(worldState.presetLabel, "Tavern Night");
+  assert.equal(worldState.npcActivity, "watching the tavern door");
 });
 
 test("smoke: NPC FVTT ownership resolves by session id, user id, username, then default", () => {

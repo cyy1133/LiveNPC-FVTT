@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld("api", {
   launchCodexLogin: (config) => ipcRenderer.invoke("codex:login:launch", { config }),
   installPrerequisites: (config) => ipcRenderer.invoke("setup:installPrerequisites", { config }),
   pickMarkdownFile: (defaultPath) => ipcRenderer.invoke("files:pickMarkdown", { defaultPath }),
+  pickJsonFile: (defaultPath) => ipcRenderer.invoke("files:pickJsonOpen", { defaultPath }),
+  pickJsonSaveFile: (defaultPath) => ipcRenderer.invoke("files:pickJsonSave", { defaultPath }),
   readTextFile: (filePath) => ipcRenderer.invoke("files:readText", { filePath }),
   writeTextFile: (filePath, text) => ipcRenderer.invoke("files:writeText", { filePath, text }),
 });

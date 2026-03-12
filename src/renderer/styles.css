@@ -103,6 +103,13 @@ main {
   letter-spacing: 0.2px;
 }
 
+.panel h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.82);
+}
+
 .tab-strip {
   padding: 10px 12px;
 }
@@ -151,6 +158,23 @@ main {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
+}
+
+.social-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.social-section {
+  background: var(--panel2);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.social-world-text {
+  min-height: 180px;
 }
 
 .field {

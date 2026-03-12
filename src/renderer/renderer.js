@@ -18,6 +18,7 @@ let npcCardStateLoaded = false;
 let npcAvatarLazyObserver = null;
 let npcAvatarLazyObserverRoot = null;
 let runtimeStarted = false;
+let selectedSocialPresetId = "";
 
 function $(id) {
   return document.getElementById(id);
@@ -153,6 +154,78 @@ function formatJsonArrayText(value) {
   return JSON.stringify(list, null, 2);
 }
 
+function ensureArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function ensureAmbientShape(ambient, directorFallback = null) {
+  const out = ambient && typeof ambient === "object" ? ambient : {};
+  const fallback = directorFallback && typeof directorFallback === "object" ? directorFallback : {};
+  const legacyEnabled = fallback.enabled === true && fallback.allowAmbientTalk !== false;
+  out.enabled = out.enabled === true || (out.enabled === undefined ? legacyEnabled : false);
+  out.promptFile = String(out.promptFile || "");
+  out.promptText = String(out.promptText || "");
+  return out;
+}
+
+function ensureScenePresetShape(preset, index = 0, directorFallback = null, ambientFallback = null) {
+  const out = preset && typeof preset === "object" ? preset : {};
+  out.id = String(out.id || out.presetId || `scene-preset-${index + 1}`);
+  out.label = String(
+    out.label || out.name || out.sceneName || out.mapName || out.sceneId || out.mapId || `Scene Preset ${index + 1}`
+  );
+  out.sceneId = String(out.sceneId || out.mapId || "");
+  out.sceneName = String(out.sceneName || out.mapName || "");
+  out.worldStateText = String(out.worldStateText || out.worldSetupText || "");
+  out.director = ensureDirectorGlobalShape(out.director, directorFallback);
+  out.ambient = ensureAmbientShape(out.ambient, ambientFallback || out.director);
+  out.npcOverrides = Array.isArray(out.npcOverrides) ? out.npcOverrides : [];
+  out.npcOverrides = out.npcOverrides
+    .map((override) => {
+      const next = override && typeof override === "object" ? override : {};
+      next.npcId = String(next.npcId || next.id || next.name || "");
+      next.displayName = String(next.displayName || next.name || next.npcId || "");
+      next.director = normalizeNpcDirectorOverrideShape(next.director || next);
+      return next;
+    })
+    .filter((override) => String(override.npcId || "").trim());
+  return out;
+}
+
+function normalizeNpcDirectorOverrideShape(director) {
+  const out = director && typeof director === "object" ? director : {};
+  out.enabled = normalizeOptionalBool(out.enabled);
+  out.allowAmbientTalk = normalizeOptionalBool(out.allowAmbientTalk);
+  out.allowNpcToNpc = normalizeOptionalBool(out.allowNpcToNpc);
+  out.socialWeight = Number.isFinite(Number(out.socialWeight)) ? Number(out.socialWeight) : 1;
+  out.playerNearbyFt = Number.isFinite(Number(out.playerNearbyFt)) ? Number(out.playerNearbyFt) : null;
+  out.npcCooldownMs = Number.isFinite(Number(out.npcCooldownMs)) ? Number(out.npcCooldownMs) : null;
+  out.promptFile = String(out.promptFile || "");
+  out.promptText = String(out.promptText || "");
+  return out;
+}
+
+function ensureDirectorGlobalShape(director, fallback = null) {
+  const out = director && typeof director === "object" ? director : {};
+  const base = fallback && typeof fallback === "object" ? fallback : {};
+  out.enabled = out.enabled === true || (out.enabled === undefined ? base.enabled === true : false);
+  out.mode = normalizeDirectorMode(out.mode || base.mode || "nearby");
+  out.promptFile = String(out.promptFile || base.promptFile || ".\\persona-defaults\\director.md");
+  out.promptText = String(out.promptText || base.promptText || "");
+  out.allowAmbientTalk = out.allowAmbientTalk === undefined ? base.allowAmbientTalk !== false : out.allowAmbientTalk !== false;
+  out.allowNpcToNpc = out.allowNpcToNpc === undefined ? base.allowNpcToNpc !== false : out.allowNpcToNpc !== false;
+  if (!Number.isFinite(Number(out.playerNearbyFt))) out.playerNearbyFt = Number.isFinite(Number(base.playerNearbyFt)) ? Number(base.playerNearbyFt) : 30;
+  if (!Number.isFinite(Number(out.maxChainTurns))) out.maxChainTurns = Number.isFinite(Number(base.maxChainTurns)) ? Number(base.maxChainTurns) : 2;
+  if (!Number.isFinite(Number(out.maxParticipants))) out.maxParticipants = Number.isFinite(Number(base.maxParticipants)) ? Number(base.maxParticipants) : 3;
+  if (!Number.isFinite(Number(out.npcCooldownMs))) out.npcCooldownMs = Number.isFinite(Number(base.npcCooldownMs)) ? Number(base.npcCooldownMs) : 45000;
+  if (!Number.isFinite(Number(out.sceneCooldownMs))) out.sceneCooldownMs = Number.isFinite(Number(base.sceneCooldownMs)) ? Number(base.sceneCooldownMs) : 15000;
+  if (!Number.isFinite(Number(out.tokenBudgetPerWindow))) out.tokenBudgetPerWindow = Number.isFinite(Number(base.tokenBudgetPerWindow)) ? Number(base.tokenBudgetPerWindow) : 8;
+  if (!Number.isFinite(Number(out.tokenBudgetWindowMs))) out.tokenBudgetWindowMs = Number.isFinite(Number(base.tokenBudgetWindowMs)) ? Number(base.tokenBudgetWindowMs) : 600000;
+  if (!Number.isFinite(Number(out.lineDelayMinMs))) out.lineDelayMinMs = Number.isFinite(Number(base.lineDelayMinMs)) ? Number(base.lineDelayMinMs) : 300;
+  if (!Number.isFinite(Number(out.lineDelayMaxMs))) out.lineDelayMaxMs = Number.isFinite(Number(base.lineDelayMaxMs)) ? Number(base.lineDelayMaxMs) : 900;
+  return out;
+}
+
 function ensureNpcShape(npc, index = 0) {
   const out = npc && typeof npc === "object" ? npc : {};
   out.id = String(out.id || `npc${index + 1}`);
@@ -178,19 +251,7 @@ function ensureNpcShape(npc, index = 0) {
   out.foundry.userId = String(out.foundry.userId || out.foundry.fvttUserId || "");
   out.foundry.username = String(out.foundry.username || out.foundry.userName || "");
 
-  out.director = out.director && typeof out.director === "object" ? out.director : {};
-  out.director.enabled = normalizeOptionalBool(out.director.enabled);
-  out.director.allowAmbientTalk = normalizeOptionalBool(out.director.allowAmbientTalk);
-  out.director.allowNpcToNpc = normalizeOptionalBool(out.director.allowNpcToNpc);
-  out.director.socialWeight = Number.isFinite(Number(out.director.socialWeight)) ? Number(out.director.socialWeight) : 1;
-  out.director.playerNearbyFt = Number.isFinite(Number(out.director.playerNearbyFt))
-    ? Number(out.director.playerNearbyFt)
-    : null;
-  out.director.npcCooldownMs = Number.isFinite(Number(out.director.npcCooldownMs))
-    ? Number(out.director.npcCooldownMs)
-    : null;
-  out.director.promptFile = String(out.director.promptFile || "");
-  out.director.promptText = String(out.director.promptText || "");
+  out.director = normalizeNpcDirectorOverrideShape(out.director);
 
   out.image = out.image && typeof out.image === "object" ? out.image : {};
   out.image.enabled = out.image.enabled === true;
@@ -224,22 +285,17 @@ function ensureConfigShape(config) {
   out.npc.defaultNpcId = String(out.npc.defaultNpcId || "");
   out.npc.sharedDocs = out.npc.sharedDocs && typeof out.npc.sharedDocs === "object" ? out.npc.sharedDocs : {};
   out.npc.sharedDocs.world = String(out.npc.sharedDocs.world || "");
-  out.npc.director = out.npc.director && typeof out.npc.director === "object" ? out.npc.director : {};
-  out.npc.director.enabled = out.npc.director.enabled === true;
-  out.npc.director.mode = normalizeDirectorMode(out.npc.director.mode);
-  out.npc.director.promptFile = String(out.npc.director.promptFile || ".\\persona-defaults\\director.md");
-  out.npc.director.promptText = String(out.npc.director.promptText || "");
-  out.npc.director.allowAmbientTalk = out.npc.director.allowAmbientTalk !== false;
-  out.npc.director.allowNpcToNpc = out.npc.director.allowNpcToNpc !== false;
-  if (!Number.isFinite(Number(out.npc.director.playerNearbyFt))) out.npc.director.playerNearbyFt = 30;
-  if (!Number.isFinite(Number(out.npc.director.maxChainTurns))) out.npc.director.maxChainTurns = 2;
-  if (!Number.isFinite(Number(out.npc.director.maxParticipants))) out.npc.director.maxParticipants = 3;
-  if (!Number.isFinite(Number(out.npc.director.npcCooldownMs))) out.npc.director.npcCooldownMs = 45000;
-  if (!Number.isFinite(Number(out.npc.director.sceneCooldownMs))) out.npc.director.sceneCooldownMs = 15000;
-  if (!Number.isFinite(Number(out.npc.director.tokenBudgetPerWindow))) out.npc.director.tokenBudgetPerWindow = 8;
-  if (!Number.isFinite(Number(out.npc.director.tokenBudgetWindowMs))) out.npc.director.tokenBudgetWindowMs = 600000;
-  if (!Number.isFinite(Number(out.npc.director.lineDelayMinMs))) out.npc.director.lineDelayMinMs = 300;
-  if (!Number.isFinite(Number(out.npc.director.lineDelayMaxMs))) out.npc.director.lineDelayMaxMs = 900;
+  out.npc.director = ensureDirectorGlobalShape(out.npc.director);
+  out.npc.ambient = ensureAmbientShape(out.npc.ambient, out.npc.director);
+  out.npc.worldStateText = String(out.npc.worldStateText || out.npc.worldSetupText || "");
+  out.npc.scenePresets = Array.isArray(out.npc.scenePresets)
+    ? out.npc.scenePresets
+    : Array.isArray(out.npc.mapPresets)
+      ? out.npc.mapPresets
+      : [];
+  out.npc.scenePresets = out.npc.scenePresets.map((preset, idx) =>
+    ensureScenePresetShape(preset, idx, out.npc.director, out.npc.ambient)
+  );
 
   out.imageGeneration =
     out.imageGeneration && typeof out.imageGeneration === "object" ? out.imageGeneration : {};
@@ -446,6 +502,7 @@ function syncNpcGlobalInputsFromConfig(config) {
   }
 
   const director = config?.npc?.director || {};
+  const ambient = config?.npc?.ambient || {};
 
   const directorEnabled = $("f-director-enabled");
   if (directorEnabled) {
@@ -492,6 +549,28 @@ function syncNpcGlobalInputsFromConfig(config) {
   assignNumber("f-director-token-window-ms", director.tokenBudgetWindowMs, 600000);
   assignNumber("f-director-line-delay-min-ms", director.lineDelayMinMs, 300);
   assignNumber("f-director-line-delay-max-ms", director.lineDelayMaxMs, 900);
+
+  const ambientEnabled = $("f-ambient-enabled");
+  if (ambientEnabled) {
+    ambientEnabled.checked = ambient.enabled === true;
+  }
+
+  const ambientPromptFile = $("f-ambient-prompt-file");
+  if (ambientPromptFile) {
+    ambientPromptFile.value = String(ambient.promptFile || "");
+  }
+
+  const ambientPromptText = $("f-ambient-prompt-text");
+  if (ambientPromptText) {
+    ambientPromptText.value = String(ambient.promptText || "");
+  }
+
+  const worldStateInput = $("f-world-state-text");
+  if (worldStateInput) {
+    worldStateInput.value = String(config?.npc?.worldStateText || "");
+  }
+
+  syncSocialPresetSelectFromConfig(config);
 }
 
 function applyNpcGlobalFormToConfig(config) {
@@ -499,6 +578,7 @@ function applyNpcGlobalFormToConfig(config) {
   next.npc = next.npc || {};
   next.npc.sharedDocs = next.npc.sharedDocs || {};
   next.npc.director = next.npc.director || {};
+  next.npc.ambient = next.npc.ambient || {};
 
   const worldInput = $("f-world-doc");
   next.npc.sharedDocs.world = String(worldInput?.value || "").trim();
@@ -524,7 +604,120 @@ function applyNpcGlobalFormToConfig(config) {
   assignNumber("tokenBudgetWindowMs", "f-director-token-window-ms", 600000);
   assignNumber("lineDelayMinMs", "f-director-line-delay-min-ms", 300);
   assignNumber("lineDelayMaxMs", "f-director-line-delay-max-ms", 900);
+  next.npc.ambient.enabled = $("f-ambient-enabled")?.checked === true;
+  next.npc.ambient.promptFile = String($("f-ambient-prompt-file")?.value || "").trim();
+  next.npc.ambient.promptText = String($("f-ambient-prompt-text")?.value || "").trim();
+  next.npc.worldStateText = String($("f-world-state-text")?.value || "").trim();
 
+  return next;
+}
+
+function makeUniqueScenePresetId(config, base = "scene-preset") {
+  const taken = new Set(
+    (Array.isArray(config?.npc?.scenePresets) ? config.npc.scenePresets : [])
+      .map((preset) => String(preset?.id || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  let i = 1;
+  while (taken.has(`${base}-${i}`.toLowerCase())) {
+    i += 1;
+  }
+  return `${base}-${i}`;
+}
+
+function getSelectedScenePreset(config) {
+  const presets = Array.isArray(config?.npc?.scenePresets) ? config.npc.scenePresets : [];
+  return presets.find((preset) => String(preset?.id || "") === String(selectedSocialPresetId || "")) || null;
+}
+
+function syncSocialPresetSelectFromConfig(config) {
+  const select = $("f-social-preset-select");
+  if (!select) return;
+  const presets = Array.isArray(config?.npc?.scenePresets) ? config.npc.scenePresets : [];
+  if (!selectedSocialPresetId && presets[0]?.id) {
+    selectedSocialPresetId = String(presets[0].id || "");
+  }
+  if (selectedSocialPresetId && !presets.some((preset) => String(preset?.id || "") === selectedSocialPresetId)) {
+    selectedSocialPresetId = String(presets[0]?.id || "");
+  }
+
+  select.innerHTML = "";
+  if (!presets.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "(No presets)";
+    select.appendChild(option);
+  } else {
+    for (const preset of presets) {
+      const option = document.createElement("option");
+      option.value = String(preset?.id || "");
+      option.textContent = String(preset?.label || preset?.sceneName || preset?.sceneId || preset?.id || "(unnamed)");
+      select.appendChild(option);
+    }
+  }
+  select.value = String(selectedSocialPresetId || "");
+  syncSelectedScenePresetFields(config);
+}
+
+function syncSelectedScenePresetFields(config) {
+  const preset = getSelectedScenePreset(config);
+  const labelInput = $("f-social-preset-label");
+  const sceneIdInput = $("f-social-preset-scene-id");
+  const sceneNameInput = $("f-social-preset-scene-name");
+  if (labelInput) labelInput.value = String(preset?.label || "");
+  if (sceneIdInput) sceneIdInput.value = String(preset?.sceneId || "");
+  if (sceneNameInput) sceneNameInput.value = String(preset?.sceneName || "");
+}
+
+function captureCurrentSocialPreset(config, basePreset = null) {
+  config = ensureConfigShape(config || {});
+  const existing = basePreset && typeof basePreset === "object" ? basePreset : {};
+  return ensureScenePresetShape(
+    {
+      id: existing.id || makeUniqueScenePresetId(config),
+      label:
+        existing.label ||
+        existing.sceneName ||
+        existing.sceneId ||
+        `Scene Preset ${Array.isArray(config?.npc?.scenePresets) ? config.npc.scenePresets.length + 1 : 1}`,
+      sceneId: existing.sceneId || "",
+      sceneName: existing.sceneName || "",
+      worldStateText: String(config?.npc?.worldStateText || ""),
+      director: cloneJson(config?.npc?.director || {}),
+      ambient: cloneJson(config?.npc?.ambient || {}),
+      npcOverrides: (Array.isArray(config?.npcs) ? config.npcs : []).map((npc) => ({
+        npcId: String(npc?.id || ""),
+        displayName: String(npc?.displayName || npc?.id || ""),
+        director: cloneJson(npc?.director || {}),
+      })),
+    },
+    0,
+    config?.npc?.director || {},
+    config?.npc?.ambient || {}
+  );
+}
+
+function applyScenePresetToConfig(config, preset) {
+  const next = ensureConfigShape(config || {});
+  const normalized = ensureScenePresetShape(preset, 0, next?.npc?.director || {}, next?.npc?.ambient || {});
+  next.npc.director = ensureDirectorGlobalShape(cloneJson(normalized.director || {}));
+  next.npc.ambient = ensureAmbientShape(cloneJson(normalized.ambient || {}), next.npc.director);
+  next.npc.worldStateText = String(normalized.worldStateText || "");
+  const overrideMap = new Map(
+    ensureArray(normalized.npcOverrides).map((override) => [String(override?.npcId || "").trim(), override])
+  );
+  next.npcs = ensureArray(next.npcs).map((npc, index) => {
+    const current = ensureNpcShape(npc, index);
+    const override =
+      overrideMap.get(String(current?.id || "").trim()) ||
+      ensureArray(normalized.npcOverrides).find(
+        (entry) =>
+          String(entry?.displayName || "").trim().toLowerCase() === String(current?.displayName || "").trim().toLowerCase()
+      );
+    if (!override) return current;
+    current.director = normalizeNpcDirectorOverrideShape(cloneJson(override.director || {}));
+    return current;
+  });
   return next;
 }
 
@@ -769,6 +962,7 @@ function getDocTargetLabel(config, target) {
   if (!target || !config) return "Markdown";
   if (target.kind === "world") return "Shared World Lore";
   if (target.kind === "directorGlobal") return "Director - Global Prompt";
+  if (target.kind === "ambientGlobal") return "Ambient - Global Prompt";
 
   if (target.kind === "npcDoc") {
     const npc = Array.isArray(config?.npcs) ? config.npcs[target.npcIndex] : null;
@@ -792,6 +986,7 @@ function getDocTargetPath(config, target) {
   if (!target || !config) return "";
   if (target.kind === "world") return String(config?.npc?.sharedDocs?.world || "");
   if (target.kind === "directorGlobal") return String(config?.npc?.director?.promptFile || "");
+  if (target.kind === "ambientGlobal") return String(config?.npc?.ambient?.promptFile || "");
 
   if (target.kind === "npcDoc") {
     const npc = Array.isArray(config?.npcs) ? config.npcs[target.npcIndex] : null;
@@ -820,6 +1015,10 @@ function setDocTargetPath(config, target, nextPath) {
     config.npc = config.npc || {};
     config.npc.director = config.npc.director || {};
     config.npc.director.promptFile = p;
+  } else if (target.kind === "ambientGlobal") {
+    config.npc = config.npc || {};
+    config.npc.ambient = config.npc.ambient || {};
+    config.npc.ambient.promptFile = p;
   } else if (target.kind === "npcDoc") {
     const npc = Array.isArray(config?.npcs) ? config.npcs[target.npcIndex] : null;
     if (!npc) return;
@@ -1917,6 +2116,80 @@ async function reloadNpcSettingsOnly() {
   renderNpcList(currentConfig);
   syncNpcGlobalInputsFromConfig(currentConfig);
 }
+
+function buildScenePresetExportPack(preset) {
+  return {
+    kind: "livenpc-social-scene-preset",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    preset: cloneJson(preset || {}),
+  };
+}
+
+async function exportSelectedScenePreset() {
+  currentConfig = applyNpcGlobalFormToConfig(currentConfig || {});
+  const preset = getSelectedScenePreset(currentConfig);
+  if (!preset) throw new Error("no scene preset selected");
+
+  const suggestedName = `${String(preset.label || preset.sceneName || preset.sceneId || preset.id || "scene-preset")
+    .replace(/[^\w\-]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "scene-preset"}.json`;
+  const picked = await window.api.pickJsonSaveFile(suggestedName);
+  if (!picked?.ok) {
+    if (picked?.canceled) return false;
+    throw new Error(picked?.error || "export path selection failed");
+  }
+
+  const payload = JSON.stringify(buildScenePresetExportPack(preset), null, 2);
+  const saved = await window.api.writeTextFile(picked.path, payload);
+  if (!saved?.ok) throw new Error(saved?.error || "preset export failed");
+  appendLog({ ts: Date.now(), level: "info", scope: "ui", message: `scene preset exported: ${picked.path}` });
+  return true;
+}
+
+async function importScenePreset() {
+  const picked = await window.api.pickJsonFile();
+  if (!picked?.ok) {
+    if (picked?.canceled) return false;
+    throw new Error(picked?.error || "import selection failed");
+  }
+
+  const read = await window.api.readTextFile(picked.path);
+  if (!read?.ok) throw new Error(read?.error || "preset import read failed");
+
+  const parsed = JSON.parse(String(read.text || "{}"));
+  const rawPreset =
+    parsed && typeof parsed === "object" && parsed.preset && typeof parsed.preset === "object" ? parsed.preset : parsed;
+
+  currentConfig = ensureConfigShape(currentConfig || {});
+  const imported = ensureScenePresetShape(
+    rawPreset,
+    Array.isArray(currentConfig?.npc?.scenePresets) ? currentConfig.npc.scenePresets.length : 0,
+    currentConfig?.npc?.director || {},
+    currentConfig?.npc?.ambient || {}
+  );
+
+  const presets = Array.isArray(currentConfig?.npc?.scenePresets) ? currentConfig.npc.scenePresets : [];
+  const existingIndex = presets.findIndex((preset) => String(preset?.id || "") === String(imported.id || ""));
+  if (existingIndex >= 0) {
+    presets[existingIndex] = imported;
+  } else {
+    presets.push(imported);
+  }
+  currentConfig.npc.scenePresets = presets;
+  selectedSocialPresetId = String(imported.id || "");
+  currentConfig = applyScenePresetToConfig(currentConfig, imported);
+  setConfigEditor(currentConfig);
+  renderNpcList(currentConfig);
+  syncNpcGlobalInputsFromConfig(currentConfig);
+  appendLog({
+    ts: Date.now(),
+    level: "info",
+    scope: "ui",
+    message: `scene preset imported and applied: ${picked.path}`,
+  });
+  return true;
+}
 async function installPrerequisitesForCurrentConfig({ silent = false } = {}) {
   currentConfig = applyQuickFormToConfig(currentConfig || {});
   if (!silent) {
@@ -2037,6 +2310,10 @@ async function init() {
     "f-director-token-window-ms",
     "f-director-line-delay-min-ms",
     "f-director-line-delay-max-ms",
+    "f-ambient-enabled",
+    "f-ambient-prompt-file",
+    "f-ambient-prompt-text",
+    "f-world-state-text",
   ];
   for (const fieldId of npcGlobalFieldIds) {
     const el = $(fieldId);
@@ -2072,6 +2349,176 @@ async function init() {
   if (directorPromptEditButton) {
     directorPromptEditButton.addEventListener("click", async () => {
       await editTargetWithFallbackPick({ kind: "directorGlobal" });
+    });
+  }
+
+  const ambientPromptPickButton = $("btn-ambient-prompt-pick");
+  if (ambientPromptPickButton) {
+    ambientPromptPickButton.addEventListener("click", async () => {
+      await pickMarkdownForTarget({ kind: "ambientGlobal" }, { openEditor: false });
+    });
+  }
+
+  const ambientPromptEditButton = $("btn-ambient-prompt-edit");
+  if (ambientPromptEditButton) {
+    ambientPromptEditButton.addEventListener("click", async () => {
+      await editTargetWithFallbackPick({ kind: "ambientGlobal" });
+    });
+  }
+
+  const socialPresetSelect = $("f-social-preset-select");
+  if (socialPresetSelect) {
+    socialPresetSelect.addEventListener("change", () => {
+      selectedSocialPresetId = String(socialPresetSelect.value || "");
+      syncSelectedScenePresetFields(currentConfig || {});
+    });
+  }
+
+  const bindPresetMetaField = (fieldId, key) => {
+    const el = $(fieldId);
+    if (!el) return;
+    el.addEventListener("change", () => {
+      currentConfig = ensureConfigShape(currentConfig || {});
+      const preset = getSelectedScenePreset(currentConfig);
+      if (!preset) return;
+      preset[key] = String(el.value || "").trim();
+      if (key === "label") {
+        syncSocialPresetSelectFromConfig(currentConfig);
+      }
+      setConfigEditor(currentConfig);
+    });
+  };
+  bindPresetMetaField("f-social-preset-label", "label");
+  bindPresetMetaField("f-social-preset-scene-id", "sceneId");
+  bindPresetMetaField("f-social-preset-scene-name", "sceneName");
+
+  const newPresetButton = $("btn-social-preset-new");
+  if (newPresetButton) {
+    newPresetButton.addEventListener("click", () => {
+      currentConfig = applyNpcGlobalFormToConfig(currentConfig || {});
+      const preset = captureCurrentSocialPreset(currentConfig, {
+        id: makeUniqueScenePresetId(currentConfig),
+        label: "New Scene Preset",
+        sceneId: "",
+        sceneName: "",
+      });
+      currentConfig.npc.scenePresets.push(preset);
+      selectedSocialPresetId = String(preset.id || "");
+      syncNpcGlobalInputsFromConfig(currentConfig);
+      setConfigEditor(currentConfig);
+      appendLog({ ts: Date.now(), level: "info", scope: "ui", message: `scene preset created: ${preset.label}` });
+    });
+  }
+
+  const capturePresetButton = $("btn-social-preset-capture");
+  if (capturePresetButton) {
+    capturePresetButton.addEventListener("click", () => {
+      currentConfig = applyNpcGlobalFormToConfig(currentConfig || {});
+      const current = getSelectedScenePreset(currentConfig);
+      if (!current) {
+        appendLog({ ts: Date.now(), level: "warn", scope: "ui", message: "no scene preset selected to capture into" });
+        return;
+      }
+      const captured = captureCurrentSocialPreset(currentConfig, current);
+      const presets = currentConfig.npc.scenePresets || [];
+      const index = presets.findIndex((preset) => String(preset?.id || "") === String(current.id || ""));
+      if (index >= 0) presets[index] = captured;
+      currentConfig.npc.scenePresets = presets;
+      selectedSocialPresetId = String(captured.id || "");
+      syncNpcGlobalInputsFromConfig(currentConfig);
+      setConfigEditor(currentConfig);
+      appendLog({ ts: Date.now(), level: "info", scope: "ui", message: `scene preset captured: ${captured.label}` });
+    });
+  }
+
+  const applyPresetButton = $("btn-social-preset-apply");
+  if (applyPresetButton) {
+    applyPresetButton.addEventListener("click", () => {
+      currentConfig = applyNpcGlobalFormToConfig(currentConfig || {});
+      const preset = getSelectedScenePreset(currentConfig);
+      if (!preset) {
+        appendLog({ ts: Date.now(), level: "warn", scope: "ui", message: "no scene preset selected to apply" });
+        return;
+      }
+      currentConfig = applyScenePresetToConfig(currentConfig, preset);
+      setConfigEditor(currentConfig);
+      renderNpcList(currentConfig);
+      syncNpcGlobalInputsFromConfig(currentConfig);
+      appendLog({ ts: Date.now(), level: "info", scope: "ui", message: `scene preset applied: ${preset.label}` });
+    });
+  }
+
+  const deletePresetButton = $("btn-social-preset-delete");
+  if (deletePresetButton) {
+    deletePresetButton.addEventListener("click", () => {
+      currentConfig = ensureConfigShape(currentConfig || {});
+      const preset = getSelectedScenePreset(currentConfig);
+      if (!preset) return;
+      currentConfig.npc.scenePresets = ensureArray(currentConfig.npc.scenePresets).filter(
+        (entry) => String(entry?.id || "") !== String(preset.id || "")
+      );
+      selectedSocialPresetId = String(currentConfig.npc.scenePresets[0]?.id || "");
+      syncNpcGlobalInputsFromConfig(currentConfig);
+      setConfigEditor(currentConfig);
+      appendLog({ ts: Date.now(), level: "info", scope: "ui", message: `scene preset deleted: ${preset.label}` });
+    });
+  }
+
+  const exportPresetButton = $("btn-social-preset-export");
+  if (exportPresetButton) {
+    exportPresetButton.addEventListener("click", async () => {
+      exportPresetButton.disabled = true;
+      try {
+        await exportSelectedScenePreset();
+      } catch (e) {
+        appendLog({ ts: Date.now(), level: "error", scope: "ui", message: `preset export failed: ${e?.message || e}` });
+      } finally {
+        exportPresetButton.disabled = false;
+      }
+    });
+  }
+
+  const importPresetButton = $("btn-social-preset-import");
+  if (importPresetButton) {
+    importPresetButton.addEventListener("click", async () => {
+      importPresetButton.disabled = true;
+      try {
+        await importScenePreset();
+      } catch (e) {
+        appendLog({ ts: Date.now(), level: "error", scope: "ui", message: `preset import failed: ${e?.message || e}` });
+      } finally {
+        importPresetButton.disabled = false;
+      }
+    });
+  }
+
+  const saveSocialButton = $("btn-save-social");
+  if (saveSocialButton) {
+    saveSocialButton.addEventListener("click", async () => {
+      saveSocialButton.disabled = true;
+      try {
+        await saveNpcSettingsOnly();
+        appendLog({ ts: Date.now(), level: "info", scope: "ui", message: "social settings saved" });
+      } catch (e) {
+        appendLog({ ts: Date.now(), level: "error", scope: "ui", message: `social save failed: ${e?.message || e}` });
+      } finally {
+        saveSocialButton.disabled = false;
+      }
+    });
+  }
+
+  const reloadSocialButton = $("btn-reload-social");
+  if (reloadSocialButton) {
+    reloadSocialButton.addEventListener("click", async () => {
+      reloadSocialButton.disabled = true;
+      try {
+        await reloadNpcSettingsOnly();
+        appendLog({ ts: Date.now(), level: "info", scope: "ui", message: "social settings reloaded" });
+      } catch (e) {
+        appendLog({ ts: Date.now(), level: "error", scope: "ui", message: `social reload failed: ${e?.message || e}` });
+      } finally {
+        reloadSocialButton.disabled = false;
+      }
     });
   }
 

@@ -37,6 +37,7 @@
       <section class="panel tab-strip">
         <div class="main-tabs">
           <button class="tab-btn active" type="button" data-main-tab-btn="basic">기본 설정</button>
+          <button class="tab-btn" type="button" data-main-tab-btn="social">소셜 연기</button>
           <button class="tab-btn" type="button" data-main-tab-btn="npc">NPC 설정</button>
         </div>
       </section>
@@ -177,31 +178,23 @@
         </div>
       </section>
 
-      <section class="panel tab-content" data-main-tab-content="npc">
+      <section class="panel tab-content" data-main-tab-content="social">
         <div class="row">
-          <h2 style="margin: 0">NPC</h2>
+          <h2 style="margin: 0">Social Director + Ambient</h2>
           <div class="row-actions">
-            <button id="btn-reload-npc" type="button">Reload NPC</button>
-            <button id="btn-refresh-npc-visuals" type="button">Refresh Tokens</button>
-            <button id="btn-save-npc" type="button" class="primary">Save NPC</button>
-            <button id="btn-add-npc" type="button">Add NPC</button>
+            <button id="btn-reload-social" type="button">Reload Social</button>
+            <button id="btn-save-social" type="button" class="primary">Save Social</button>
           </div>
         </div>
-        <div class="npc-layout" id="npc-layout">
-          <div class="npc-main">
-            <div class="field">
-              <label for="f-world-doc">Shared World Lore File (.md)</label>
-              <div class="file-row">
-                <input id="f-world-doc" type="text" placeholder="C:\\docs\\world.md" />
-                <button id="btn-world-doc-pick" type="button">Select</button>
-                <button id="btn-world-doc-edit" type="button">Edit</button>
-              </div>
-            </div>
-            <div class="form-grid" style="margin-top: 10px">
+
+        <div class="social-grid">
+          <section class="social-section">
+            <h3>Director</h3>
+            <div class="form-grid">
               <div class="field checkbox">
                 <label>
                   <input id="f-director-enabled" type="checkbox" />
-                  Enable social director by default
+                  Enable social director
                 </label>
               </div>
               <div class="field">
@@ -215,7 +208,7 @@
               <div class="field checkbox">
                 <label>
                   <input id="f-director-ambient" type="checkbox" />
-                  Allow ambient daily talk
+                  Allow ambient daily talk for director-selected NPCs
                 </label>
               </div>
               <div class="field checkbox">
@@ -277,8 +270,116 @@
                 ></textarea>
               </div>
             </div>
+          </section>
+
+          <section class="social-section">
+            <h3>Ambient Chatter</h3>
+            <div class="form-grid">
+              <div class="field checkbox">
+                <label>
+                  <input id="f-ambient-enabled" type="checkbox" />
+                  Enable ambient chatter separately from director follow-ups
+                </label>
+              </div>
+              <div class="field" style="grid-column: 1 / -1">
+                <label for="f-ambient-prompt-file">Ambient Prompt File (.md)</label>
+                <div class="file-row">
+                  <input id="f-ambient-prompt-file" type="text" placeholder="C:\\docs\\ambient.md" />
+                  <button id="btn-ambient-prompt-pick" type="button">Select</button>
+                  <button id="btn-ambient-prompt-edit" type="button">Edit</button>
+                </div>
+              </div>
+              <div class="field" style="grid-column: 1 / -1">
+                <label for="f-ambient-prompt-text">Ambient Prompt Inline Addendum</label>
+                <textarea
+                  id="f-ambient-prompt-text"
+                  class="npc-textarea"
+                  placeholder="Optional note for idle chatter tone, cadence, or restrictions"
+                ></textarea>
+              </div>
+            </div>
+          </section>
+
+          <section class="social-section">
+            <h3>World Activity</h3>
+            <div class="field">
+              <label for="f-world-state-text">Current World Setup (`@NPC Name: doing something`)</label>
+              <textarea
+                id="f-world-state-text"
+                class="npc-textarea social-world-text"
+                placeholder="@Barkeep: polishing mugs and listening for rumors&#10;@Town Guard: checking the gate ledger&#10;The tavern is tense after sundown."
+              ></textarea>
+            </div>
+            <div class="hint">
+              Each `@NPC Name:` line becomes that NPC's current activity. Non-`@` lines are shared scene setup.
+            </div>
+          </section>
+
+          <section class="social-section">
+            <div class="row" style="margin-bottom: 6px">
+              <h3 style="margin: 0">Scene Presets</h3>
+              <div class="row-actions">
+                <button id="btn-social-preset-new" type="button">New Preset</button>
+                <button id="btn-social-preset-capture" type="button">Capture Current</button>
+                <button id="btn-social-preset-apply" type="button">Apply Preset</button>
+                <button id="btn-social-preset-delete" type="button" class="danger">Delete</button>
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="f-social-preset-select">Preset</label>
+                <select id="f-social-preset-select"></select>
+              </div>
+              <div class="field">
+                <label for="f-social-preset-label">Preset Label</label>
+                <input id="f-social-preset-label" type="text" placeholder="Tavern Night" />
+              </div>
+              <div class="field">
+                <label for="f-social-preset-scene-id">Scene ID Match (optional)</label>
+                <input id="f-social-preset-scene-id" type="text" placeholder="fvtt-scene-id" />
+              </div>
+              <div class="field">
+                <label for="f-social-preset-scene-name">Scene Name Match</label>
+                <input id="f-social-preset-scene-name" type="text" placeholder="The Rusty Dragon Inn" />
+              </div>
+            </div>
+            <div class="row-actions" style="margin-top: 10px">
+              <button id="btn-social-preset-export" type="button">Export Preset</button>
+              <button id="btn-social-preset-import" type="button">Import Preset</button>
+            </div>
+            <div class="hint">
+              `Capture Current` stores the current director/ambient/world setup plus current NPC social overrides into the selected scene preset.
+            </div>
+            <div class="hint">
+              Runtime auto-matches presets by `Scene ID` first, then `Scene Name`. `Import Preset` also applies it immediately for DM prep.
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="panel tab-content" data-main-tab-content="npc">
+        <div class="row">
+          <h2 style="margin: 0">NPC</h2>
+          <div class="row-actions">
+            <button id="btn-reload-npc" type="button">Reload NPC</button>
+            <button id="btn-refresh-npc-visuals" type="button">Refresh Tokens</button>
+            <button id="btn-save-npc" type="button" class="primary">Save NPC</button>
+            <button id="btn-add-npc" type="button">Add NPC</button>
+          </div>
+        </div>
+        <div class="npc-layout" id="npc-layout">
+          <div class="npc-main">
+            <div class="field">
+              <label for="f-world-doc">Shared World Lore File (.md)</label>
+              <div class="file-row">
+                <input id="f-world-doc" type="text" placeholder="C:\\docs\\world.md" />
+                <button id="btn-world-doc-pick" type="button">Select</button>
+                <button id="btn-world-doc-edit" type="button">Edit</button>
+              </div>
+            </div>
             <div class="hint">One shared world-lore markdown is included for every NPC prompt.</div>
-            <div class="hint">Global director settings are the default. NPC cards can override individual director options and bind to a specific FVTT session or owner.</div>
+            <div class="hint">Global social/ambient settings and map presets are managed in the `소셜 연기` tab.</div>
+            <div class="hint">NPC cards can override individual director options and bind to a specific FVTT session or owner.</div>
             <div class="hint">Toggle NPCs on/off and set actor + soul/battle files. Use `Save NPC` / `Reload NPC` for NPC-only persistence.</div>
             <div class="hint">Reaction distance: NPC responds only when source token is within `React Distance <= ft` (0 disables this gate). If source token is not resolved, it is skipped.</div>
             <div class="npc-list" id="npc-list"></div>

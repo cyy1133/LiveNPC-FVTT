@@ -84,7 +84,60 @@
       "tokenBudgetWindowMs": 600000,
       "lineDelayMinMs": 300,
       "lineDelayMaxMs": 900
-    }
+    },
+    "ambient": {
+      "enabled": false,
+      "promptFile": "",
+      "promptText": ""
+    },
+    "worldStateText": "@Diana: watching the room from the window table",
+    "scenePresets": [
+      {
+        "id": "rusty-dragon-night",
+        "label": "Rusty Dragon Night",
+        "sceneId": "",
+        "sceneName": "Rusty Dragon Inn",
+        "worldStateText": "@Diana: leaning on the bar and listening for rumors\n@Town Guard: checking the door and scanning late arrivals",
+        "director": {
+          "enabled": true,
+          "mode": "directed",
+          "promptFile": ".\\persona-defaults\\director.md",
+          "promptText": "",
+          "allowAmbientTalk": true,
+          "allowNpcToNpc": true,
+          "playerNearbyFt": 30,
+          "maxChainTurns": 2,
+          "maxParticipants": 3,
+          "npcCooldownMs": 45000,
+          "sceneCooldownMs": 15000,
+          "tokenBudgetPerWindow": 8,
+          "tokenBudgetWindowMs": 600000,
+          "lineDelayMinMs": 300,
+          "lineDelayMaxMs": 900
+        },
+        "ambient": {
+          "enabled": true,
+          "promptFile": "",
+          "promptText": ""
+        },
+        "npcOverrides": [
+          {
+            "npcId": "diana",
+            "displayName": "Diana",
+            "director": {
+              "enabled": null,
+              "allowAmbientTalk": true,
+              "allowNpcToNpc": true,
+              "socialWeight": 2,
+              "playerNearbyFt": null,
+              "npcCooldownMs": null,
+              "promptFile": "",
+              "promptText": ""
+            }
+          }
+        ]
+      }
+    ]
   },
   "npcs": [
     {
