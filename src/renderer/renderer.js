@@ -11,7 +11,7 @@ const NPC_CARD_STATE_STORAGE_KEY = "livenpc:npc-card-expanded:v1";
 const NPC_VIRTUALIZATION_THRESHOLD = 24;
 const NPC_VIRTUAL_OVERSCAN_PX = 420;
 const NPC_VIRTUAL_COLLAPSED_HEIGHT_PX = 72;
-const NPC_VIRTUAL_EXPANDED_HEIGHT_PX = 560;
+const NPC_VIRTUAL_EXPANDED_HEIGHT_PX = 980;
 const NPC_VIRTUAL_CARD_GAP_PX = 10;
 
 let npcCardStateLoaded = false;
@@ -111,6 +111,48 @@ function getProvider(config) {
   return String(config?.llm?.provider || "codex-cli").trim().toLowerCase();
 }
 
+function normalizeDirectorMode(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "off" || raw === "disabled") return "off";
+  if (raw === "directed" || raw === "scene" || raw === "conversation") return "directed";
+  return "nearby";
+}
+
+function normalizeOptionalBool(value) {
+  if (value === true) return true;
+  if (value === false) return false;
+  return null;
+}
+
+function optionalBoolSelectValue(value) {
+  if (value === true) return "on";
+  if (value === false) return "off";
+  return "global";
+}
+
+function parseOptionalBoolSelectValue(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "on" || raw === "true" || raw === "yes") return true;
+  if (raw === "off" || raw === "false" || raw === "no") return false;
+  return null;
+}
+
+function parseJsonArrayText(value, fallback = []) {
+  const text = String(value || "").trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function formatJsonArrayText(value) {
+  const list = Array.isArray(value) ? value : [];
+  return JSON.stringify(list, null, 2);
+}
+
 function ensureNpcShape(npc, index = 0) {
   const out = npc && typeof npc === "object" ? npc : {};
   out.id = String(out.id || `npc${index + 1}`);
@@ -131,6 +173,25 @@ function ensureNpcShape(npc, index = 0) {
   if (!Number.isFinite(Number(out.triggers.minFt))) out.triggers.minFt = 2;
   if (!Number.isFinite(Number(out.triggers.maxFt))) out.triggers.maxFt = 30;
 
+  out.foundry = out.foundry && typeof out.foundry === "object" ? out.foundry : {};
+  out.foundry.sessionId = String(out.foundry.sessionId || out.foundry.binding || "");
+  out.foundry.userId = String(out.foundry.userId || out.foundry.fvttUserId || "");
+  out.foundry.username = String(out.foundry.username || out.foundry.userName || "");
+
+  out.director = out.director && typeof out.director === "object" ? out.director : {};
+  out.director.enabled = normalizeOptionalBool(out.director.enabled);
+  out.director.allowAmbientTalk = normalizeOptionalBool(out.director.allowAmbientTalk);
+  out.director.allowNpcToNpc = normalizeOptionalBool(out.director.allowNpcToNpc);
+  out.director.socialWeight = Number.isFinite(Number(out.director.socialWeight)) ? Number(out.director.socialWeight) : 1;
+  out.director.playerNearbyFt = Number.isFinite(Number(out.director.playerNearbyFt))
+    ? Number(out.director.playerNearbyFt)
+    : null;
+  out.director.npcCooldownMs = Number.isFinite(Number(out.director.npcCooldownMs))
+    ? Number(out.director.npcCooldownMs)
+    : null;
+  out.director.promptFile = String(out.director.promptFile || "");
+  out.director.promptText = String(out.director.promptText || "");
+
   out.image = out.image && typeof out.image === "object" ? out.image : {};
   out.image.enabled = out.image.enabled === true;
   const fallbackPrompt = String(out.image.defaultPrompt || out.image.baseTags || "").trim();
@@ -142,6 +203,20 @@ function ensureNpcShape(npc, index = 0) {
 function ensureConfigShape(config) {
   const out = config && typeof config === "object" ? config : {};
 
+  out.foundry = out.foundry && typeof out.foundry === "object" ? out.foundry : {};
+  out.foundry.defaultSessionId = String(out.foundry.defaultSessionId || "default");
+  out.foundry.sessions = Array.isArray(out.foundry.sessions) ? out.foundry.sessions : [];
+  out.foundry.sessions = out.foundry.sessions.map((session, idx) => {
+    const next = session && typeof session === "object" ? session : {};
+    next.id = String(next.id || next.sessionId || `session-${idx + 1}`);
+    next.label = String(next.label || next.name || next.id);
+    next.username = String(next.username || next.userName || "");
+    next.password = String(next.password || "");
+    next.userId = String(next.userId || next.fvttUserId || "");
+    next.autoConnect = next.autoConnect === true;
+    return next;
+  });
+
   out.npc = out.npc && typeof out.npc === "object" ? out.npc : {};
   if (!Number.isFinite(Number(out.npc.difficultTerrainMultiplier))) {
     out.npc.difficultTerrainMultiplier = 2;
@@ -149,6 +224,22 @@ function ensureConfigShape(config) {
   out.npc.defaultNpcId = String(out.npc.defaultNpcId || "");
   out.npc.sharedDocs = out.npc.sharedDocs && typeof out.npc.sharedDocs === "object" ? out.npc.sharedDocs : {};
   out.npc.sharedDocs.world = String(out.npc.sharedDocs.world || "");
+  out.npc.director = out.npc.director && typeof out.npc.director === "object" ? out.npc.director : {};
+  out.npc.director.enabled = out.npc.director.enabled === true;
+  out.npc.director.mode = normalizeDirectorMode(out.npc.director.mode);
+  out.npc.director.promptFile = String(out.npc.director.promptFile || ".\\persona-defaults\\director.md");
+  out.npc.director.promptText = String(out.npc.director.promptText || "");
+  out.npc.director.allowAmbientTalk = out.npc.director.allowAmbientTalk !== false;
+  out.npc.director.allowNpcToNpc = out.npc.director.allowNpcToNpc !== false;
+  if (!Number.isFinite(Number(out.npc.director.playerNearbyFt))) out.npc.director.playerNearbyFt = 30;
+  if (!Number.isFinite(Number(out.npc.director.maxChainTurns))) out.npc.director.maxChainTurns = 2;
+  if (!Number.isFinite(Number(out.npc.director.maxParticipants))) out.npc.director.maxParticipants = 3;
+  if (!Number.isFinite(Number(out.npc.director.npcCooldownMs))) out.npc.director.npcCooldownMs = 45000;
+  if (!Number.isFinite(Number(out.npc.director.sceneCooldownMs))) out.npc.director.sceneCooldownMs = 15000;
+  if (!Number.isFinite(Number(out.npc.director.tokenBudgetPerWindow))) out.npc.director.tokenBudgetPerWindow = 8;
+  if (!Number.isFinite(Number(out.npc.director.tokenBudgetWindowMs))) out.npc.director.tokenBudgetWindowMs = 600000;
+  if (!Number.isFinite(Number(out.npc.director.lineDelayMinMs))) out.npc.director.lineDelayMinMs = 300;
+  if (!Number.isFinite(Number(out.npc.director.lineDelayMaxMs))) out.npc.director.lineDelayMaxMs = 900;
 
   out.imageGeneration =
     out.imageGeneration && typeof out.imageGeneration === "object" ? out.imageGeneration : {};
@@ -172,6 +263,17 @@ function ensureConfigShape(config) {
       actor: { type: "name", value: "NPC" },
       personaDocs: { identity: "", soul: "", behavior: "", battle: "", relations: "", memory: "" },
       triggers: { minFt: 2, maxFt: 30 },
+      foundry: { sessionId: "", userId: "", username: "" },
+      director: {
+        enabled: null,
+        allowAmbientTalk: null,
+        allowNpcToNpc: null,
+        socialWeight: 1,
+        playerNearbyFt: null,
+        npcCooldownMs: null,
+        promptFile: "",
+        promptText: "",
+      },
       image: { enabled: false, defaultPrompt: "", baseTags: "" },
     });
   }
@@ -299,6 +401,7 @@ function createNpcTemplate(config) {
   const defaultMaxFt = Number.isFinite(Number(diana?.triggers?.maxFt)) ? Number(diana.triggers.maxFt) : 30;
   const defaultImagePrompt = String(diana?.image?.defaultPrompt || diana?.image?.baseTags || "");
   const defaultImageEnabled = diana?.image?.enabled === true;
+  const defaultSessionId = String(diana?.foundry?.sessionId || "");
 
   return ensureNpcShape(
     {
@@ -315,6 +418,17 @@ function createNpcTemplate(config) {
         memory: "",
       },
       triggers: { minFt: defaultMinFt, maxFt: defaultMaxFt },
+      foundry: { sessionId: defaultSessionId, userId: "", username: "" },
+      director: {
+        enabled: null,
+        allowAmbientTalk: null,
+        allowNpcToNpc: null,
+        socialWeight: 1,
+        playerNearbyFt: null,
+        npcCooldownMs: null,
+        promptFile: "",
+        promptText: "",
+      },
       image: {
         enabled: defaultImageEnabled,
         defaultPrompt: defaultImagePrompt,
@@ -325,10 +439,93 @@ function createNpcTemplate(config) {
   );
 }
 
-function syncWorldDocInputFromConfig(config) {
+function syncNpcGlobalInputsFromConfig(config) {
   const worldInput = $("f-world-doc");
-  if (!worldInput) return;
-  worldInput.value = String(config?.npc?.sharedDocs?.world || "");
+  if (worldInput) {
+    worldInput.value = String(config?.npc?.sharedDocs?.world || "");
+  }
+
+  const director = config?.npc?.director || {};
+
+  const directorEnabled = $("f-director-enabled");
+  if (directorEnabled) {
+    directorEnabled.checked = director.enabled === true;
+  }
+
+  const directorMode = $("f-director-mode");
+  if (directorMode) {
+    directorMode.value = normalizeDirectorMode(director.mode);
+  }
+
+  const directorPromptFile = $("f-director-prompt-file");
+  if (directorPromptFile) {
+    directorPromptFile.value = String(director.promptFile || "");
+  }
+
+  const directorPromptText = $("f-director-prompt-text");
+  if (directorPromptText) {
+    directorPromptText.value = String(director.promptText || "");
+  }
+
+  const directorAmbient = $("f-director-ambient");
+  if (directorAmbient) {
+    directorAmbient.checked = director.allowAmbientTalk !== false;
+  }
+
+  const directorNpcToNpc = $("f-director-npc2npc");
+  if (directorNpcToNpc) {
+    directorNpcToNpc.checked = director.allowNpcToNpc !== false;
+  }
+
+  const assignNumber = (id, value, fallback) => {
+    const input = $(id);
+    if (!input) return;
+    input.value = String(Number.isFinite(Number(value)) ? Number(value) : fallback);
+  };
+
+  assignNumber("f-director-player-nearby-ft", director.playerNearbyFt, 30);
+  assignNumber("f-director-max-chain-turns", director.maxChainTurns, 2);
+  assignNumber("f-director-max-participants", director.maxParticipants, 3);
+  assignNumber("f-director-npc-cooldown-ms", director.npcCooldownMs, 45000);
+  assignNumber("f-director-scene-cooldown-ms", director.sceneCooldownMs, 15000);
+  assignNumber("f-director-token-budget", director.tokenBudgetPerWindow, 8);
+  assignNumber("f-director-token-window-ms", director.tokenBudgetWindowMs, 600000);
+  assignNumber("f-director-line-delay-min-ms", director.lineDelayMinMs, 300);
+  assignNumber("f-director-line-delay-max-ms", director.lineDelayMaxMs, 900);
+}
+
+function applyNpcGlobalFormToConfig(config) {
+  const next = ensureConfigShape(config || {});
+  next.npc = next.npc || {};
+  next.npc.sharedDocs = next.npc.sharedDocs || {};
+  next.npc.director = next.npc.director || {};
+
+  const worldInput = $("f-world-doc");
+  next.npc.sharedDocs.world = String(worldInput?.value || "").trim();
+
+  next.npc.director.enabled = $("f-director-enabled")?.checked === true;
+  next.npc.director.mode = normalizeDirectorMode($("f-director-mode")?.value || "nearby");
+  next.npc.director.promptFile = String($("f-director-prompt-file")?.value || "").trim();
+  next.npc.director.promptText = String($("f-director-prompt-text")?.value || "").trim();
+  next.npc.director.allowAmbientTalk = $("f-director-ambient")?.checked !== false;
+  next.npc.director.allowNpcToNpc = $("f-director-npc2npc")?.checked !== false;
+
+  const assignNumber = (key, id, fallback) => {
+    const parsed = Number($(id)?.value);
+    next.npc.director[key] = Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+  };
+
+  assignNumber("playerNearbyFt", "f-director-player-nearby-ft", 30);
+  assignNumber("maxChainTurns", "f-director-max-chain-turns", 2);
+  assignNumber("maxParticipants", "f-director-max-participants", 3);
+  assignNumber("npcCooldownMs", "f-director-npc-cooldown-ms", 45000);
+  assignNumber("sceneCooldownMs", "f-director-scene-cooldown-ms", 15000);
+  assignNumber("tokenBudgetPerWindow", "f-director-token-budget", 8);
+  assignNumber("tokenBudgetWindowMs", "f-director-token-window-ms", 600000);
+  assignNumber("lineDelayMinMs", "f-director-line-delay-min-ms", 300);
+  assignNumber("lineDelayMaxMs", "f-director-line-delay-max-ms", 900);
+
+  return next;
 }
 
 function openAiOauthStatusText(config) {
@@ -411,6 +608,12 @@ async function loadQuickFormFromConfig(config) {
   $("f-fvtt-user").value = String(config?.foundry?.username || "");
   $("f-fvtt-pass").value = String(config?.foundry?.password || "");
   $("f-fvtt-headless").checked = Boolean(config?.foundry?.headless);
+  if ($("f-fvtt-default-session")) {
+    $("f-fvtt-default-session").value = String(config?.foundry?.defaultSessionId || "default");
+  }
+  if ($("f-fvtt-sessions-json")) {
+    $("f-fvtt-sessions-json").value = formatJsonArrayText(config?.foundry?.sessions || []);
+  }
 
   const provider = getProvider(config);
   $("f-llm-provider").value = provider;
@@ -431,7 +634,7 @@ async function loadQuickFormFromConfig(config) {
   $("f-image-width").value = String(config?.imageGeneration?.width || 768);
   $("f-image-height").value = String(config?.imageGeneration?.height || 768);
 
-  syncWorldDocInputFromConfig(config);
+  syncNpcGlobalInputsFromConfig(config);
   updateQuickSetupUi(config);
   await refreshProviderStatus(config);
 }
@@ -451,6 +654,8 @@ function applyQuickFormToConfig(config) {
   config.foundry.username = String($("f-fvtt-user").value || "").trim();
   config.foundry.password = String($("f-fvtt-pass").value || "");
   config.foundry.headless = Boolean($("f-fvtt-headless").checked);
+  config.foundry.defaultSessionId = String($("f-fvtt-default-session")?.value || config.foundry.defaultSessionId || "default").trim() || "default";
+  config.foundry.sessions = parseJsonArrayText($("f-fvtt-sessions-json")?.value, config.foundry.sessions);
   if (!Number.isFinite(Number(config.foundry.pollChatEveryMs))) {
     config.foundry.pollChatEveryMs = 1200;
   }
@@ -500,8 +705,7 @@ function applyQuickFormToConfig(config) {
   const timeoutMs = Number(config.imageGeneration.timeoutMs);
   config.imageGeneration.timeoutMs = Number.isFinite(timeoutMs) && timeoutMs >= 15000 ? timeoutMs : 120000;
 
-  const worldDocInput = $("f-world-doc");
-  config.npc.sharedDocs.world = String(worldDocInput?.value || "").trim();
+  applyNpcGlobalFormToConfig(config);
 
   updateQuickSetupUi(config);
   return config;
@@ -564,6 +768,7 @@ function isSameDocTarget(a, b) {
 function getDocTargetLabel(config, target) {
   if (!target || !config) return "Markdown";
   if (target.kind === "world") return "Shared World Lore";
+  if (target.kind === "directorGlobal") return "Director - Global Prompt";
 
   if (target.kind === "npcDoc") {
     const npc = Array.isArray(config?.npcs) ? config.npcs[target.npcIndex] : null;
@@ -574,17 +779,30 @@ function getDocTargetLabel(config, target) {
     return `${npcName} - ${key}`;
   }
 
+  if (target.kind === "npcDirectorPrompt") {
+    const npc = Array.isArray(config?.npcs) ? config.npcs[target.npcIndex] : null;
+    const npcName = String(npc?.displayName || npc?.id || `npc_${target.npcIndex}`);
+    return `${npcName} - Director Prompt`;
+  }
+
   return "Markdown";
 }
 
 function getDocTargetPath(config, target) {
   if (!target || !config) return "";
   if (target.kind === "world") return String(config?.npc?.sharedDocs?.world || "");
+  if (target.kind === "directorGlobal") return String(config?.npc?.director?.promptFile || "");
 
   if (target.kind === "npcDoc") {
     const npc = Array.isArray(config?.npcs) ? config.npcs[target.npcIndex] : null;
     if (!npc) return "";
     return String(npc?.personaDocs?.[target.docKey] || "");
+  }
+
+  if (target.kind === "npcDirectorPrompt") {
+    const npc = Array.isArray(config?.npcs) ? config.npcs[target.npcIndex] : null;
+    if (!npc) return "";
+    return String(npc?.director?.promptFile || "");
   }
 
   return "";
@@ -598,11 +816,20 @@ function setDocTargetPath(config, target, nextPath) {
     config.npc = config.npc || {};
     config.npc.sharedDocs = config.npc.sharedDocs || {};
     config.npc.sharedDocs.world = p;
+  } else if (target.kind === "directorGlobal") {
+    config.npc = config.npc || {};
+    config.npc.director = config.npc.director || {};
+    config.npc.director.promptFile = p;
   } else if (target.kind === "npcDoc") {
     const npc = Array.isArray(config?.npcs) ? config.npcs[target.npcIndex] : null;
     if (!npc) return;
     npc.personaDocs = npc.personaDocs || {};
     npc.personaDocs[target.docKey] = p;
+  } else if (target.kind === "npcDirectorPrompt") {
+    const npc = Array.isArray(config?.npcs) ? config.npcs[target.npcIndex] : null;
+    if (!npc) return;
+    npc.director = npc.director || {};
+    npc.director.promptFile = p;
   }
 
   if (mdEditorTarget && isSameDocTarget(target, mdEditorTarget)) {
@@ -775,7 +1002,7 @@ async function pickMarkdownForTarget(target, { openEditor = false } = {}) {
     }
 
     setDocTargetPath(currentConfig, target, picked.path);
-    syncWorldDocInputFromConfig(currentConfig);
+    syncNpcGlobalInputsFromConfig(currentConfig);
     renderNpcList(currentConfig);
     setConfigEditor(currentConfig);
 
@@ -1033,7 +1260,13 @@ function createNpcCardElement(config, npc, i, { virtualized = false } = {}) {
   summary.className = "npc-summary";
 
   const updateSummary = () => {
-    summary.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} react<=${Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0}ft image=${npc?.image?.enabled ? "on" : "off"}`;
+    const reactFt = Number.isFinite(Number(npc?.triggers?.maxFt)) ? Number(npc.triggers.maxFt) : 0;
+    const sessionRef =
+      String(npc?.foundry?.sessionId || npc?.foundry?.username || npc?.foundry?.userId || config?.foundry?.defaultSessionId || "")
+        .trim() || "-";
+    const directorRef = optionalBoolSelectValue(npc?.director?.enabled);
+    const socialWeight = Number.isFinite(Number(npc?.director?.socialWeight)) ? Number(npc.director.socialWeight) : 1;
+    summary.textContent = `id=${npc.id || "-"} actor=${npc?.actor?.value || "-"} session=${sessionRef} react<=${reactFt}ft dir=${directorRef} weight=${socialWeight} image=${npc?.image?.enabled ? "on" : "off"}`;
   };
 
   const setCardExpanded = (nextExpanded, { reflow = true } = {}) => {
@@ -1212,6 +1445,246 @@ function createNpcCardElement(config, npc, i, { virtualized = false } = {}) {
     onEdit: () => editTargetWithFallbackPick(battleTarget),
   });
 
+  const foundryDetails = document.createElement("details");
+  foundryDetails.className = "npc-image-details";
+  if (
+    String(npc?.foundry?.sessionId || "").trim() ||
+    String(npc?.foundry?.userId || "").trim() ||
+    String(npc?.foundry?.username || "").trim()
+  ) {
+    foundryDetails.open = true;
+  }
+
+  const foundrySummary = document.createElement("summary");
+  foundrySummary.textContent = "FVTT Ownership / Session";
+  foundryDetails.appendChild(foundrySummary);
+
+  const foundryBody = document.createElement("div");
+  foundryBody.className = "npc-image-body";
+
+  const sessionRow = document.createElement("div");
+  sessionRow.className = "npc-doc-row";
+  const sessionLabel = document.createElement("label");
+  sessionLabel.textContent = "Preferred Session ID";
+  const sessionInput = document.createElement("input");
+  sessionInput.type = "text";
+  sessionInput.placeholder = String(config?.foundry?.defaultSessionId || "default");
+  sessionInput.value = String(npc?.foundry?.sessionId || "");
+  sessionInput.addEventListener("change", () => {
+    npc.foundry = npc.foundry || {};
+    npc.foundry.sessionId = String(sessionInput.value || "").trim();
+    updateSummary();
+    setConfigEditor(config);
+  });
+  sessionRow.appendChild(sessionLabel);
+  sessionRow.appendChild(sessionInput);
+
+  const fvttUserIdRow = document.createElement("div");
+  fvttUserIdRow.className = "npc-doc-row";
+  const fvttUserIdLabel = document.createElement("label");
+  fvttUserIdLabel.textContent = "Fallback FVTT User ID";
+  const fvttUserIdInput = document.createElement("input");
+  fvttUserIdInput.type = "text";
+  fvttUserIdInput.placeholder = "owner id";
+  fvttUserIdInput.value = String(npc?.foundry?.userId || "");
+  fvttUserIdInput.addEventListener("change", () => {
+    npc.foundry = npc.foundry || {};
+    npc.foundry.userId = String(fvttUserIdInput.value || "").trim();
+    updateSummary();
+    setConfigEditor(config);
+  });
+  fvttUserIdRow.appendChild(fvttUserIdLabel);
+  fvttUserIdRow.appendChild(fvttUserIdInput);
+
+  const fvttUsernameRow = document.createElement("div");
+  fvttUsernameRow.className = "npc-doc-row";
+  const fvttUsernameLabel = document.createElement("label");
+  fvttUsernameLabel.textContent = "Fallback FVTT Username";
+  const fvttUsernameInput = document.createElement("input");
+  fvttUsernameInput.type = "text";
+  fvttUsernameInput.placeholder = "owner username";
+  fvttUsernameInput.value = String(npc?.foundry?.username || "");
+  fvttUsernameInput.addEventListener("change", () => {
+    npc.foundry = npc.foundry || {};
+    npc.foundry.username = String(fvttUsernameInput.value || "").trim();
+    updateSummary();
+    setConfigEditor(config);
+  });
+  fvttUsernameRow.appendChild(fvttUsernameLabel);
+  fvttUsernameRow.appendChild(fvttUsernameInput);
+
+  foundryBody.appendChild(sessionRow);
+  foundryBody.appendChild(fvttUserIdRow);
+  foundryBody.appendChild(fvttUsernameRow);
+  foundryDetails.appendChild(foundryBody);
+
+  const directorDetails = document.createElement("details");
+  directorDetails.className = "npc-image-details";
+  if (
+    npc?.director?.enabled !== null ||
+    npc?.director?.allowAmbientTalk !== null ||
+    npc?.director?.allowNpcToNpc !== null ||
+    Number(npc?.director?.socialWeight || 1) !== 1 ||
+    npc?.director?.playerNearbyFt !== null ||
+    npc?.director?.npcCooldownMs !== null ||
+    String(npc?.director?.promptFile || "").trim() ||
+    String(npc?.director?.promptText || "").trim()
+  ) {
+    directorDetails.open = true;
+  }
+
+  const directorSummary = document.createElement("summary");
+  directorSummary.textContent = "Director Settings";
+  directorDetails.appendChild(directorSummary);
+
+  const directorBody = document.createElement("div");
+  directorBody.className = "npc-image-body";
+
+  const createDirectorOverrideRow = (labelText, selectedValue, onChange) => {
+    const row = document.createElement("div");
+    row.className = "npc-doc-row";
+    const label = document.createElement("label");
+    label.textContent = labelText;
+    const select = document.createElement("select");
+    select.innerHTML = [
+      '<option value="global">Use Global Default</option>',
+      '<option value="on">Force On</option>',
+      '<option value="off">Force Off</option>',
+    ].join("");
+    select.value = optionalBoolSelectValue(selectedValue);
+    select.addEventListener("change", () => onChange(parseOptionalBoolSelectValue(select.value)));
+    row.appendChild(label);
+    row.appendChild(select);
+    return row;
+  };
+
+  const directorEnabledRow = createDirectorOverrideRow("Director Enabled", npc?.director?.enabled, (value) => {
+    npc.director = npc.director || {};
+    npc.director.enabled = value;
+    updateSummary();
+    setConfigEditor(config);
+  });
+
+  const ambientOverrideRow = createDirectorOverrideRow("Ambient Daily Talk", npc?.director?.allowAmbientTalk, (value) => {
+    npc.director = npc.director || {};
+    npc.director.allowAmbientTalk = value;
+    setConfigEditor(config);
+  });
+
+  const npcToNpcOverrideRow = createDirectorOverrideRow("NPC to NPC Talk", npc?.director?.allowNpcToNpc, (value) => {
+    npc.director = npc.director || {};
+    npc.director.allowNpcToNpc = value;
+    setConfigEditor(config);
+  });
+
+  const socialWeightRow = document.createElement("div");
+  socialWeightRow.className = "npc-doc-row";
+  const socialWeightLabel = document.createElement("label");
+  socialWeightLabel.textContent = "Social Weight";
+  const socialWeightInput = document.createElement("input");
+  socialWeightInput.type = "number";
+  socialWeightInput.min = "0";
+  socialWeightInput.max = "10";
+  socialWeightInput.step = "0.1";
+  socialWeightInput.value = String(Number.isFinite(Number(npc?.director?.socialWeight)) ? Number(npc.director.socialWeight) : 1);
+  socialWeightInput.addEventListener("change", () => {
+    npc.director = npc.director || {};
+    const parsed = Number(socialWeightInput.value);
+    npc.director.socialWeight = Number.isFinite(parsed) && parsed >= 0 ? parsed : 1;
+    socialWeightInput.value = String(npc.director.socialWeight);
+    updateSummary();
+    setConfigEditor(config);
+  });
+  socialWeightRow.appendChild(socialWeightLabel);
+  socialWeightRow.appendChild(socialWeightInput);
+
+  const directorNearbyRow = document.createElement("div");
+  directorNearbyRow.className = "npc-doc-row";
+  const directorNearbyLabel = document.createElement("label");
+  directorNearbyLabel.textContent = "Player Nearby Distance Override (ft)";
+  const directorNearbyInput = document.createElement("input");
+  directorNearbyInput.type = "number";
+  directorNearbyInput.min = "0";
+  directorNearbyInput.step = "1";
+  directorNearbyInput.placeholder = "global";
+  directorNearbyInput.value =
+    npc?.director?.playerNearbyFt === null || npc?.director?.playerNearbyFt === undefined
+      ? ""
+      : String(npc.director.playerNearbyFt);
+  directorNearbyInput.addEventListener("change", () => {
+    npc.director = npc.director || {};
+    const raw = String(directorNearbyInput.value || "").trim();
+    const parsed = Number(raw);
+    npc.director.playerNearbyFt = raw && Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+    directorNearbyInput.value = npc.director.playerNearbyFt === null ? "" : String(npc.director.playerNearbyFt);
+    setConfigEditor(config);
+  });
+  directorNearbyRow.appendChild(directorNearbyLabel);
+  directorNearbyRow.appendChild(directorNearbyInput);
+
+  const directorCooldownRow = document.createElement("div");
+  directorCooldownRow.className = "npc-doc-row";
+  const directorCooldownLabel = document.createElement("label");
+  directorCooldownLabel.textContent = "NPC Cooldown Override (ms)";
+  const directorCooldownInput = document.createElement("input");
+  directorCooldownInput.type = "number";
+  directorCooldownInput.min = "0";
+  directorCooldownInput.step = "100";
+  directorCooldownInput.placeholder = "global";
+  directorCooldownInput.value =
+    npc?.director?.npcCooldownMs === null || npc?.director?.npcCooldownMs === undefined
+      ? ""
+      : String(npc.director.npcCooldownMs);
+  directorCooldownInput.addEventListener("change", () => {
+    npc.director = npc.director || {};
+    const raw = String(directorCooldownInput.value || "").trim();
+    const parsed = Number(raw);
+    npc.director.npcCooldownMs = raw && Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+    directorCooldownInput.value = npc.director.npcCooldownMs === null ? "" : String(npc.director.npcCooldownMs);
+    setConfigEditor(config);
+  });
+  directorCooldownRow.appendChild(directorCooldownLabel);
+  directorCooldownRow.appendChild(directorCooldownInput);
+
+  const directorPromptTarget = { kind: "npcDirectorPrompt", npcIndex: i };
+  const directorPromptRow = createDocPathRow({
+    label: "Director Prompt Override (.md)",
+    value: npc?.director?.promptFile || "",
+    placeholder: "C:\\docs\\npc-director.md",
+    onChange: (v) => {
+      setDocTargetPath(config, directorPromptTarget, v);
+      setConfigEditor(config);
+    },
+    onPick: () => pickMarkdownForTarget(directorPromptTarget, { openEditor: false }),
+    onEdit: () => editTargetWithFallbackPick(directorPromptTarget),
+  });
+
+  const directorPromptTextRow = document.createElement("div");
+  directorPromptTextRow.className = "npc-doc-row";
+  const directorPromptTextLabel = document.createElement("label");
+  directorPromptTextLabel.textContent = "Director Prompt Inline Addendum";
+  const directorPromptTextArea = document.createElement("textarea");
+  directorPromptTextArea.className = "npc-textarea";
+  directorPromptTextArea.placeholder = "Optional NPC-specific director note";
+  directorPromptTextArea.value = String(npc?.director?.promptText || "");
+  directorPromptTextArea.addEventListener("change", () => {
+    npc.director = npc.director || {};
+    npc.director.promptText = String(directorPromptTextArea.value || "").trim();
+    setConfigEditor(config);
+  });
+  directorPromptTextRow.appendChild(directorPromptTextLabel);
+  directorPromptTextRow.appendChild(directorPromptTextArea);
+
+  directorBody.appendChild(directorEnabledRow);
+  directorBody.appendChild(ambientOverrideRow);
+  directorBody.appendChild(npcToNpcOverrideRow);
+  directorBody.appendChild(socialWeightRow);
+  directorBody.appendChild(directorNearbyRow);
+  directorBody.appendChild(directorCooldownRow);
+  directorBody.appendChild(directorPromptRow);
+  directorBody.appendChild(directorPromptTextRow);
+  directorDetails.appendChild(directorBody);
+
   const imageDetails = document.createElement("details");
   imageDetails.className = "npc-image-details";
   if (npc?.image?.enabled || String(npc?.image?.defaultPrompt || npc?.image?.baseTags || "").trim()) {
@@ -1271,6 +1744,8 @@ function createNpcCardElement(config, npc, i, { virtualized = false } = {}) {
   controls.appendChild(reactRow);
   controls.appendChild(soulRow);
   controls.appendChild(battleRow);
+  controls.appendChild(foundryDetails);
+  controls.appendChild(directorDetails);
   controls.appendChild(imageDetails);
 
   meta.appendChild(name);
@@ -1413,11 +1888,7 @@ async function loadConfigFromMainProcess() {
 }
 
 async function saveNpcSettingsOnly() {
-  currentConfig = ensureConfigShape(currentConfig || {});
-  const worldInput = $("f-world-doc");
-  if (worldInput) {
-    currentConfig.npc.sharedDocs.world = String(worldInput.value || "").trim();
-  }
+  currentConfig = applyNpcGlobalFormToConfig(currentConfig || {});
 
   const latest = await window.api.getConfig();
   const merged = ensureConfigShape(latest?.config || {});
@@ -1428,7 +1899,7 @@ async function saveNpcSettingsOnly() {
   currentConfig = ensureConfigShape(merged);
   setConfigEditor(currentConfig);
   renderNpcList(currentConfig);
-  syncWorldDocInputFromConfig(currentConfig);
+  syncNpcGlobalInputsFromConfig(currentConfig);
 }
 
 async function reloadNpcSettingsOnly() {
@@ -1444,7 +1915,7 @@ async function reloadNpcSettingsOnly() {
   closeMdEditor({ force: true });
   setConfigEditor(currentConfig);
   renderNpcList(currentConfig);
-  syncWorldDocInputFromConfig(currentConfig);
+  syncNpcGlobalInputsFromConfig(currentConfig);
 }
 async function installPrerequisitesForCurrentConfig({ silent = false } = {}) {
   currentConfig = applyQuickFormToConfig(currentConfig || {});
@@ -1545,8 +2016,33 @@ async function init() {
   const worldInput = $("f-world-doc");
   if (worldInput) {
     worldInput.addEventListener("change", () => {
-      currentConfig = ensureConfigShape(currentConfig || {});
-      currentConfig.npc.sharedDocs.world = String(worldInput.value || "").trim();
+      currentConfig = applyNpcGlobalFormToConfig(currentConfig || {});
+      setConfigEditor(currentConfig);
+    });
+  }
+
+  const npcGlobalFieldIds = [
+    "f-director-enabled",
+    "f-director-mode",
+    "f-director-prompt-file",
+    "f-director-prompt-text",
+    "f-director-ambient",
+    "f-director-npc2npc",
+    "f-director-player-nearby-ft",
+    "f-director-max-chain-turns",
+    "f-director-max-participants",
+    "f-director-npc-cooldown-ms",
+    "f-director-scene-cooldown-ms",
+    "f-director-token-budget",
+    "f-director-token-window-ms",
+    "f-director-line-delay-min-ms",
+    "f-director-line-delay-max-ms",
+  ];
+  for (const fieldId of npcGlobalFieldIds) {
+    const el = $(fieldId);
+    if (!el) continue;
+    el.addEventListener("change", () => {
+      currentConfig = applyNpcGlobalFormToConfig(currentConfig || {});
       setConfigEditor(currentConfig);
     });
   }
@@ -1562,6 +2058,20 @@ async function init() {
   if (worldEditButton) {
     worldEditButton.addEventListener("click", async () => {
       await editTargetWithFallbackPick({ kind: "world" });
+    });
+  }
+
+  const directorPromptPickButton = $("btn-director-prompt-pick");
+  if (directorPromptPickButton) {
+    directorPromptPickButton.addEventListener("click", async () => {
+      await pickMarkdownForTarget({ kind: "directorGlobal" }, { openEditor: false });
+    });
+  }
+
+  const directorPromptEditButton = $("btn-director-prompt-edit");
+  if (directorPromptEditButton) {
+    directorPromptEditButton.addEventListener("click", async () => {
+      await editTargetWithFallbackPick({ kind: "directorGlobal" });
     });
   }
 
@@ -1744,6 +2254,7 @@ async function init() {
   $("btn-save-quick").addEventListener("click", async () => {
     $("btn-save-quick").disabled = true;
     try {
+      currentConfig = applyNpcGlobalFormToConfig(currentConfig || {});
       currentConfig = applyQuickFormToConfig(currentConfig || {});
       await window.api.setConfig(currentConfig);
       appendLog({ ts: Date.now(), level: "info", scope: "ui", message: "config saved (quick setup)" });

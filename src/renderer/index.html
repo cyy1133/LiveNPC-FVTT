@@ -90,6 +90,18 @@
                 Headless browser
               </label>
             </div>
+            <div class="field">
+              <label for="f-fvtt-default-session">Default FVTT Session ID</label>
+              <input id="f-fvtt-default-session" type="text" placeholder="gm" />
+            </div>
+            <div class="field" style="grid-column: 1 / -1">
+              <label for="f-fvtt-sessions-json">Extra FVTT Sessions (JSON array)</label>
+              <textarea
+                id="f-fvtt-sessions-json"
+                class="npc-textarea"
+                placeholder='[{"id":"absent-player-1","label":"Absent Player 1","username":"player1","password":"...","userId":"fvtt-user-id","autoConnect":true}]'
+              ></textarea>
+            </div>
 
             <div class="field">
               <label for="f-llm-provider">LLM Provider</label>
@@ -133,6 +145,11 @@
           <div class="hint">
             Recommended: click <code>Install Prerequisites</code> once on first run.
             For Codex CLI, login is completed in a terminal window.
+          </div>
+          <div class="hint">
+            Extra FVTT sessions are used for NPC/absent-player ownership routing. Each entry can include
+            <code>id</code>, <code>label</code>, <code>url</code>, <code>username</code>, <code>password</code>,
+            <code>userId</code>, and <code>autoConnect</code>.
           </div>
           <div class="hint">
             Full trace files are saved as <code>runtime-trace-*.ndjson</code>. Start log에서 실제 경로를 확인하세요.
@@ -180,7 +197,88 @@
                 <button id="btn-world-doc-edit" type="button">Edit</button>
               </div>
             </div>
+            <div class="form-grid" style="margin-top: 10px">
+              <div class="field checkbox">
+                <label>
+                  <input id="f-director-enabled" type="checkbox" />
+                  Enable social director by default
+                </label>
+              </div>
+              <div class="field">
+                <label for="f-director-mode">Director Mode</label>
+                <select id="f-director-mode">
+                  <option value="off">Off</option>
+                  <option value="nearby">Nearby</option>
+                  <option value="directed">Directed</option>
+                </select>
+              </div>
+              <div class="field checkbox">
+                <label>
+                  <input id="f-director-ambient" type="checkbox" />
+                  Allow ambient daily talk
+                </label>
+              </div>
+              <div class="field checkbox">
+                <label>
+                  <input id="f-director-npc2npc" type="checkbox" />
+                  Allow NPC-to-NPC talk
+                </label>
+              </div>
+              <div class="field">
+                <label for="f-director-player-nearby-ft">Player Nearby Distance (ft)</label>
+                <input id="f-director-player-nearby-ft" type="number" min="0" step="1" placeholder="30" />
+              </div>
+              <div class="field">
+                <label for="f-director-max-chain-turns">Max NPC-only Chain Turns</label>
+                <input id="f-director-max-chain-turns" type="number" min="0" step="1" placeholder="2" />
+              </div>
+              <div class="field">
+                <label for="f-director-max-participants">Max Participants</label>
+                <input id="f-director-max-participants" type="number" min="1" step="1" placeholder="3" />
+              </div>
+              <div class="field">
+                <label for="f-director-npc-cooldown-ms">NPC Cooldown (ms)</label>
+                <input id="f-director-npc-cooldown-ms" type="number" min="0" step="100" placeholder="45000" />
+              </div>
+              <div class="field">
+                <label for="f-director-scene-cooldown-ms">Scene Cooldown (ms)</label>
+                <input id="f-director-scene-cooldown-ms" type="number" min="0" step="100" placeholder="15000" />
+              </div>
+              <div class="field">
+                <label for="f-director-token-budget">Token Budget / Window</label>
+                <input id="f-director-token-budget" type="number" min="0" step="1" placeholder="8" />
+              </div>
+              <div class="field">
+                <label for="f-director-token-window-ms">Token Budget Window (ms)</label>
+                <input id="f-director-token-window-ms" type="number" min="0" step="1000" placeholder="600000" />
+              </div>
+              <div class="field">
+                <label for="f-director-line-delay-min-ms">Line Delay Min (ms)</label>
+                <input id="f-director-line-delay-min-ms" type="number" min="0" step="50" placeholder="300" />
+              </div>
+              <div class="field">
+                <label for="f-director-line-delay-max-ms">Line Delay Max (ms)</label>
+                <input id="f-director-line-delay-max-ms" type="number" min="0" step="50" placeholder="900" />
+              </div>
+              <div class="field" style="grid-column: 1 / -1">
+                <label for="f-director-prompt-file">Director Prompt File (.md)</label>
+                <div class="file-row">
+                  <input id="f-director-prompt-file" type="text" placeholder="C:\\docs\\director.md" />
+                  <button id="btn-director-prompt-pick" type="button">Select</button>
+                  <button id="btn-director-prompt-edit" type="button">Edit</button>
+                </div>
+              </div>
+              <div class="field" style="grid-column: 1 / -1">
+                <label for="f-director-prompt-text">Director Prompt Inline Addendum</label>
+                <textarea
+                  id="f-director-prompt-text"
+                  class="npc-textarea"
+                  placeholder="Optional global note for the social-scene director"
+                ></textarea>
+              </div>
+            </div>
             <div class="hint">One shared world-lore markdown is included for every NPC prompt.</div>
+            <div class="hint">Global director settings are the default. NPC cards can override individual director options and bind to a specific FVTT session or owner.</div>
             <div class="hint">Toggle NPCs on/off and set actor + soul/battle files. Use `Save NPC` / `Reload NPC` for NPC-only persistence.</div>
             <div class="hint">Reaction distance: NPC responds only when source token is within `React Distance <= ft` (0 disables this gate). If source token is not resolved, it is skipped.</div>
             <div class="npc-list" id="npc-list"></div>

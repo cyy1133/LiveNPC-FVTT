@@ -52,10 +52,169 @@ function ensureArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function ensureString(value, fallback = "") {
+  return String(value ?? fallback).trim();
+}
+
 function clampInt(value, fallback, min = 64, max = 4096) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function clampNonNegativeInt(value, fallback, max = 86_400_000) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(max, Math.round(n)));
+}
+
+function normalizeDirectorMode(value) {
+  const raw = ensureString(value).toLowerCase();
+  if (raw === "off" || raw === "disabled") return "off";
+  if (raw === "directed" || raw === "scene" || raw === "conversation") return "directed";
+  return "nearby";
+}
+
+function normalizeOptionalBool(value) {
+  if (value === true) return true;
+  if (value === false) return false;
+  return null;
+}
+
+function normalizeFoundrySessionConfig(rawSession, fallbackSessionId, foundryRoot = {}) {
+  const session = isPlainObject(rawSession) ? rawSession : {};
+  const sessionId = ensureString(session.id || session.sessionId || fallbackSessionId || "default") || "default";
+  const username = ensureString(session.username || session.userName || foundryRoot.username || "");
+  const userId = ensureString(session.userId || session.fvttUserId || "");
+  const url = ensureString(session.url || foundryRoot.url || "");
+  const password =
+    session.password !== undefined ? String(session.password || "") : String(foundryRoot.password || "");
+  return {
+    sessionId,
+    label: ensureString(session.label || session.name || sessionId),
+    username,
+    userId,
+    password,
+    url,
+    headless: session.headless === undefined ? Boolean(foundryRoot.headless) : Boolean(session.headless),
+    loginTimeoutMs: clampNonNegativeInt(
+      session.loginTimeoutMs,
+      Number(foundryRoot.loginTimeoutMs || 120_000),
+      600_000
+    ),
+    autoConnect: session.autoConnect === undefined ? Boolean(foundryRoot.autoConnect) : Boolean(session.autoConnect),
+    keepAliveMs: clampNonNegativeInt(session.keepAliveMs, Number(foundryRoot.keepAliveMs || 30_000), 3_600_000),
+    combatAutoTurn:
+      session.combatAutoTurn === undefined ? foundryRoot.combatAutoTurn !== false : session.combatAutoTurn !== false,
+  };
+}
+
+function collectFoundrySessionConfigs(config) {
+  const foundry = isPlainObject(config?.foundry) ? config.foundry : {};
+  const extras = ensureArray(foundry.sessions);
+  const sessions = [];
+  const seen = new Set();
+
+  const rootSession = normalizeFoundrySessionConfig(foundry, ensureString(foundry.defaultSessionId || "default"), foundry);
+  if (rootSession.url && rootSession.username && !seen.has(rootSession.sessionId)) {
+    seen.add(rootSession.sessionId);
+    sessions.push(rootSession);
+  }
+
+  for (let i = 0; i < extras.length; i += 1) {
+    const spec = normalizeFoundrySessionConfig(extras[i], `session-${i + 1}`, foundry);
+    if (!spec.url || !spec.username || seen.has(spec.sessionId)) continue;
+    seen.add(spec.sessionId);
+    sessions.push(spec);
+  }
+
+  const requestedDefault = ensureString(foundry.defaultSessionId || rootSession.sessionId || "");
+  const defaultSessionId =
+    sessions.find((session) => session.sessionId === requestedDefault)?.sessionId || sessions[0]?.sessionId || "";
+
+  return {
+    defaultSessionId,
+    sessions,
+  };
+}
+
+function resolveNpcFoundrySessionId({ npc, sessionConfigs = [], defaultSessionId = "" } = {}) {
+  const binding = isPlainObject(npc?.foundry) ? npc.foundry : {};
+  const wanted = ensureString(binding.sessionId || binding.binding || binding.ownerId || "");
+  const wantedUserId = ensureString(binding.userId || binding.fvttUserId || "");
+  const wantedUsername = ensureString(binding.username || binding.userName || "");
+  const pool = ensureArray(sessionConfigs);
+
+  if (wanted) {
+    const hit = pool.find((session) => {
+      return [session?.sessionId, session?.userId, session?.username]
+        .map((value) => ensureString(value).toLowerCase())
+        .includes(wanted.toLowerCase());
+    });
+    if (hit?.sessionId) return hit.sessionId;
+  }
+
+  if (wantedUserId) {
+    const hit = pool.find((session) => ensureString(session?.userId).toLowerCase() === wantedUserId.toLowerCase());
+    if (hit?.sessionId) return hit.sessionId;
+  }
+
+  if (wantedUsername) {
+    const hit = pool.find((session) => ensureString(session?.username).toLowerCase() === wantedUsername.toLowerCase());
+    if (hit?.sessionId) return hit.sessionId;
+  }
+
+  return ensureString(defaultSessionId || pool[0]?.sessionId || "");
+}
+
+function normalizeGlobalDirectorConfig(config) {
+  const npcCfg = isPlainObject(config?.npc) ? config.npc : {};
+  const director = isPlainObject(npcCfg?.director) ? npcCfg.director : {};
+  const minDelay = clampNonNegativeInt(director.lineDelayMinMs, 300, 30_000);
+  const maxDelayRaw = clampNonNegativeInt(director.lineDelayMaxMs, 900, 60_000);
+  const maxDelay = Math.max(minDelay, maxDelayRaw);
+  return {
+    enabled: director.enabled === true,
+    mode: normalizeDirectorMode(director.mode),
+    promptFile: ensureString(director.promptFile || director.promptPath || ""),
+    promptText: String(director.promptText || ""),
+    allowAmbientTalk: director.allowAmbientTalk !== false,
+    allowNpcToNpc: director.allowNpcToNpc !== false,
+    playerNearbyFt: clampNonNegativeInt(director.playerNearbyFt, 30, 10_000),
+    maxChainTurns: clampNonNegativeInt(director.maxChainTurns, 2, 16),
+    maxParticipants: Math.max(1, clampNonNegativeInt(director.maxParticipants, 3, 16)),
+    npcCooldownMs: clampNonNegativeInt(director.npcCooldownMs, 45_000, 86_400_000),
+    sceneCooldownMs: clampNonNegativeInt(director.sceneCooldownMs, 15_000, 86_400_000),
+    tokenBudgetPerWindow: clampNonNegativeInt(director.tokenBudgetPerWindow, 8, 10_000),
+    tokenBudgetWindowMs: clampNonNegativeInt(director.tokenBudgetWindowMs, 600_000, 86_400_000),
+    lineDelayMinMs: minDelay,
+    lineDelayMaxMs: maxDelay,
+  };
+}
+
+function resolveDirectorConfig({ config, npc } = {}) {
+  const base = normalizeGlobalDirectorConfig(config);
+  const npcDirector = isPlainObject(npc?.director) ? npc.director : {};
+  const enabledOverride = normalizeOptionalBool(npcDirector.enabled);
+  const ambientOverride = normalizeOptionalBool(npcDirector.allowAmbientTalk);
+  const npcToNpcOverride = normalizeOptionalBool(npcDirector.allowNpcToNpc);
+  return {
+    ...base,
+    enabled: enabledOverride === null ? base.enabled : enabledOverride,
+    allowAmbientTalk: ambientOverride === null ? base.allowAmbientTalk : ambientOverride,
+    allowNpcToNpc: npcToNpcOverride === null ? base.allowNpcToNpc : npcToNpcOverride,
+    playerNearbyFt: Number.isFinite(Number(npcDirector.playerNearbyFt))
+      ? Math.max(0, Number(npcDirector.playerNearbyFt))
+      : base.playerNearbyFt,
+    npcCooldownMs: Number.isFinite(Number(npcDirector.npcCooldownMs))
+      ? Math.max(0, Number(npcDirector.npcCooldownMs))
+      : base.npcCooldownMs,
+    socialWeight: Number.isFinite(Number(npcDirector.socialWeight))
+      ? Math.max(0, Math.min(10, Number(npcDirector.socialWeight)))
+      : 1,
+    promptFile: ensureString(npcDirector.promptFile || base.promptFile || ""),
+    promptText: String(npcDirector.promptText || base.promptText || ""),
+  };
 }
 
 function normalizeNpcImageGenerationState({ config, npc } = {}) {
@@ -302,6 +461,13 @@ async function loadNpcPromptDocs({ config, npc }) {
   const [sharedWorld, persona] = await Promise.all([loadSharedWorldBundle(config), loadPersonaBundle(npc)]);
   if (sharedWorld && persona) return `${sharedWorld}\n\n${persona}`;
   return sharedWorld || persona || "";
+}
+
+async function loadDirectorPromptText({ config, npc } = {}) {
+  const resolved = resolveDirectorConfig({ config, npc });
+  const inline = String(resolved.promptText || "").trim();
+  if (inline) return inline;
+  return readMaybe(resolved.promptFile);
 }
 
 function isTargetChannel(message, channelName) {
@@ -1494,6 +1660,8 @@ function buildNpcPrompt({
   fvttActorSheet,
   mentionedSceneTokens = [],
   imageGeneration = null,
+  directorConfig = null,
+  directorPromptText = "",
 }) {
   const npcName = String(npc?.displayName || npc?.id || "NPC");
   const modeText = fvttReady ? "FVTT connected (can act in-world)" : "FVTT offline (chat only)";
@@ -1501,6 +1669,8 @@ function buildNpcPrompt({
     imageGeneration && typeof imageGeneration === "object"
       ? imageGeneration
       : normalizeNpcImageGenerationState({ config: null, npc });
+  const socialDirector =
+    directorConfig && typeof directorConfig === "object" ? directorConfig : resolveDirectorConfig({ npc });
 
   const contextLines = ensureArray(fvttChatContext)
     .slice(-10)
@@ -1597,6 +1767,27 @@ function buildNpcPrompt({
 
   if (personaText) {
     parts.push("Persona:", personaText, "");
+  }
+
+  const directorLines = [
+    "Conversation director policy (already resolved for this NPC):",
+    `- enabled: ${socialDirector.enabled ? "yes" : "no"}`,
+    `- mode: ${socialDirector.enabled ? socialDirector.mode : "off"}`,
+    `- ambient talk allowed: ${socialDirector.allowAmbientTalk ? "yes" : "no"}`,
+    `- NPC-to-NPC talk allowed: ${socialDirector.allowNpcToNpc ? "yes" : "no"}`,
+    `- player-nearby gate: ${Number(socialDirector.playerNearbyFt)}ft`,
+    `- max extra NPC turns per beat: ${Number(socialDirector.maxChainTurns)}`,
+    `- max participants: ${Number(socialDirector.maxParticipants)}`,
+    `- social weight: ${Number(socialDirector.socialWeight)}`,
+    `- NPC cooldown: ${Number(socialDirector.npcCooldownMs)}ms`,
+    `- scene cooldown: ${Number(socialDirector.sceneCooldownMs)}ms`,
+    `- token budget: ${Number(socialDirector.tokenBudgetPerWindow)} calls per ${Number(socialDirector.tokenBudgetWindowMs)}ms`,
+    `- line delay: ${Number(socialDirector.lineDelayMinMs)}-${Number(socialDirector.lineDelayMaxMs)}ms`,
+  ];
+  parts.push(...directorLines, "");
+
+  if (String(directorPromptText || "").trim()) {
+    parts.push("Director prompt:", String(directorPromptText).trim(), "");
   }
 
   if (imageState.enabled) {
@@ -1985,6 +2176,9 @@ class AppRuntime {
 
     this.discord = null;
     this.fvtt = null;
+    this.fvttClientsBySessionId = new Map();
+    this.fvttSessionConfigs = [];
+    this.fvttDefaultSessionId = "";
     this.started = false;
     this.queue = Promise.resolve();
     this._runTokenSeq = 0;
@@ -2060,6 +2254,35 @@ class AppRuntime {
     return this.queue;
   }
 
+  _getFvttClients() {
+    const clients = Array.from(this.fvttClientsBySessionId.values()).filter(Boolean);
+    if (clients.length > 0) return clients;
+    return this.fvtt ? [this.fvtt] : [];
+  }
+
+  _getFvttClientForNpc(npc) {
+    const sessionId = resolveNpcFoundrySessionId({
+      npc,
+      sessionConfigs: this.fvttSessionConfigs,
+      defaultSessionId: this.fvttDefaultSessionId,
+    });
+    if (sessionId && this.fvttClientsBySessionId.has(sessionId)) {
+      return this.fvttClientsBySessionId.get(sessionId);
+    }
+    return this.fvtt || this._getFvttClients()[0] || null;
+  }
+
+  async _ensureFvttClientForNpc(npc, runToken = 0) {
+    const fvttClient = this._getFvttClientForNpc(npc);
+    if (!fvttClient) throw new Error("FVTT not configured");
+    const connected = await fvttClient.ensureConnected();
+    this._throwIfRuntimeStopped(runToken);
+    if (!connected?.ok) {
+      throw new Error(String(connected?.error || "fvtt-connect-failed"));
+    }
+    return fvttClient;
+  }
+
   async start({ config, persistConfig } = {}) {
     if (this.started) return;
     this.started = true;
@@ -2095,33 +2318,53 @@ class AppRuntime {
     }
 
     if (config?.foundry?.enabled) {
-      const fvttConfig = {
-        foundry: {
-          url: String(config.foundry.url || "").trim(),
-          username: String(config.foundry.username || "").trim(),
-          password: String(config.foundry.password || "").trim(),
-          headless: Boolean(config.foundry.headless),
-          loginTimeoutMs: Number(config.foundry.loginTimeoutMs || 120_000),
-          autoConnect: Boolean(config.foundry.autoConnect),
-          keepAliveMs: Number(config.foundry.keepAliveMs || 30_000),
-          combatAutoTurn: config?.foundry?.combatAutoTurn !== false,
-          actorId: "", // selected per-NPC via withNpcActor()
-          actorName: "",
-        },
-        npc: {
-          difficultTerrainMultiplier: Number(config?.npc?.difficultTerrainMultiplier || 2),
-        },
-      };
-      this.fvtt = new FvttClient(fvttConfig);
-      if (config.foundry.autoConnect) {
-        this.log.info("fvtt", "autoConnect enabled; connecting...");
-        const connected = await this.fvtt.ensureConnected();
-        if (!connected.ok) {
-          this.log.warn("fvtt", `connect failed: ${connected.error}`);
-        } else {
-          this.log.info("fvtt", "connected.");
+      const sessionBundle = collectFoundrySessionConfigs(config);
+      this.fvttDefaultSessionId = sessionBundle.defaultSessionId;
+      this.fvttSessionConfigs = sessionBundle.sessions;
+      this.fvttClientsBySessionId.clear();
+
+      for (const session of sessionBundle.sessions) {
+        const fvttConfig = {
+          foundry: {
+            url: session.url,
+            username: session.username,
+            password: session.password,
+            userId: session.userId,
+            headless: session.headless,
+            loginTimeoutMs: session.loginTimeoutMs,
+            autoConnect: session.autoConnect,
+            keepAliveMs: session.keepAliveMs,
+            combatAutoTurn: session.combatAutoTurn,
+            actorId: "",
+            actorName: "",
+          },
+          npc: {
+            difficultTerrainMultiplier: Number(config?.npc?.difficultTerrainMultiplier || 2),
+          },
+        };
+        this.fvttClientsBySessionId.set(session.sessionId, new FvttClient(fvttConfig));
+      }
+
+      this.fvtt =
+        (this.fvttDefaultSessionId && this.fvttClientsBySessionId.get(this.fvttDefaultSessionId)) ||
+        this._getFvttClients()[0] ||
+        null;
+
+      const clients = this._getFvttClients();
+      const autoConnectSessions = this.fvttSessionConfigs.filter((session) => session.autoConnect);
+      if (autoConnectSessions.length > 0) {
+        for (const session of autoConnectSessions) {
+          const client = this.fvttClientsBySessionId.get(session.sessionId);
+          if (!client) continue;
+          this.log.info("fvtt", `autoConnect enabled; connecting session=${session.sessionId} user=${session.username}`);
+          const connected = await client.ensureConnected();
+          if (!connected.ok) {
+            this.log.warn("fvtt", `connect failed (${session.sessionId}): ${connected.error}`);
+          } else {
+            this.log.info("fvtt", `connected (${session.sessionId}).`);
+          }
         }
-      } else {
+      } else if (clients.length > 0) {
         this.log.info("fvtt", "will connect on demand.");
       }
 
@@ -2160,14 +2403,18 @@ class AppRuntime {
       this.discord = null;
     }
 
-    if (this.fvtt) {
+    const clients = this._getFvttClients();
+    for (const client of clients) {
       try {
-        await this.fvtt.close();
+        await client.close();
       } catch {
         // ignore
       }
-      this.fvtt = null;
     }
+    this.fvtt = null;
+    this.fvttClientsBySessionId.clear();
+    this.fvttSessionConfigs = [];
+    this.fvttDefaultSessionId = "";
 
     this._trace("runtime.stopped", { ok: true });
     await this._flushTrace();
@@ -2275,7 +2522,7 @@ class AppRuntime {
       return { ok: true, connected: false, visuals: [] };
     }
 
-    if (!this.started || !this.fvtt) {
+    if (!this.started || this._getFvttClients().length === 0) {
       return {
         ok: false,
         connected: false,
@@ -2284,22 +2531,14 @@ class AppRuntime {
       };
     }
 
-    const connected = await this.fvtt.ensureConnected().catch((e) => ({ ok: false, error: e?.message || String(e) }));
-    if (!connected?.ok) {
-      return {
-        ok: false,
-        connected: false,
-        error: String(connected?.error || "fvtt-connect-failed"),
-        visuals: npcs.map((npc) => makeFallback(npc, String(connected?.error || "fvtt-connect-failed"))),
-      };
-    }
-
     const visuals = [];
+    let anyConnected = false;
     for (const npc of npcs) {
       const npcId = String(npc?.id || "");
       const npcName = String(npc?.displayName || npc?.id || "NPC");
       try {
         const status = await this._withNpcActor(npc, () => this.fvtt.getStatus());
+        anyConnected = true;
         const actor = isPlainObject(status?.actor) ? status.actor : {};
         const token = isPlainObject(status?.token) ? status.token : {};
         const tokenImg = String(token?.img || token?.textureSrc || "").trim();
@@ -2340,7 +2579,12 @@ class AppRuntime {
       }
     }
 
-    return { ok: true, connected: true, visuals };
+    return {
+      ok: anyConnected,
+      connected: anyConnected,
+      error: anyConnected ? "" : "fvtt-connect-failed",
+      visuals,
+    };
   }
 
   async _configureTrace(config) {
@@ -2456,95 +2700,97 @@ class AppRuntime {
 
   async _pollFvttChat(config) {
     if (!this.started) return;
-    if (!this.fvtt || !config?.foundry?.enabled) return;
-    if (!this.fvtt.isReady()) return;
+    if (!config?.foundry?.enabled) return;
+
+    const clients = this._getFvttClients().filter((client) => client?.isReady());
+    if (!clients.length) return;
 
     const npcs = pickEnabledNpcs(config);
     if (!npcs.length) return;
 
-    let chat = null;
-    try {
-      chat = await this.fvtt.getRecentChat(18);
-      this._trace("fvtt.chat.poll.response", {
-        ok: Boolean(chat?.ok),
-        count: Number(chat?.count || 0),
-        limit: Number(chat?.limit || 0),
-      });
-    } catch (e) {
-      this.log.warn("fvtt", `chat poll failed: ${e?.message || e}`);
-      this._trace("fvtt.chat.poll.error", { error: e });
-      return;
-    }
-    if (!chat?.ok) return;
-
-    const messages = ensureArray(chat.messages);
-    for (const msg of messages) {
-      const id = String(msg?.id || "");
-      if (!id) continue;
-      if (this._processedFvttMessageIds.has(id)) continue;
-      this._processedFvttMessageIds.add(id);
-      if (this._processedFvttMessageIds.size > 250) {
-        // avoid unbounded growth
-        this._processedFvttMessageIds.clear();
-      }
-
-      const msgTs = Number(msg?.timestamp);
-      const hasMsgTs = Number.isFinite(msgTs) && msgTs > 0;
-      if (this._fvttInboundCutoffTs > 0) {
-        if (!hasMsgTs) {
-          this._trace("fvtt.chat.skip", {
-            reason: "missing-timestamp",
-            messageId: id,
-            cutoffTs: this._fvttInboundCutoffTs,
-          });
-          continue;
-        }
-        if (msgTs < this._fvttInboundCutoffTs) {
-          this._trace("fvtt.chat.skip", {
-            reason: "before-runtime-start",
-            messageId: id,
-            messageTs: msgTs,
-            cutoffTs: this._fvttInboundCutoffTs,
-          });
-          continue;
-        }
-      }
-
-      const speaker = String(msg?.speaker || "").trim();
-      const content = String(msg?.content || "").trim();
-      if (!content) continue;
-      if (msg?.isRoll) continue;
-      if (isLikelyFvttSystemMessage(content)) continue;
-
-      // Ignore messages that look like they came from an NPC (avoid loops).
-      const speakerLower = safeLower(speaker);
-      if (npcs.some((n) => speakerLower.includes(safeLower(n.displayName || n.id)))) {
+    for (const client of clients) {
+      let chat = null;
+      try {
+        chat = await client.getRecentChat(18);
+        this._trace("fvtt.chat.poll.response", {
+          ok: Boolean(chat?.ok),
+          count: Number(chat?.count || 0),
+          limit: Number(chat?.limit || 0),
+          sessionUser: ensureString(client?.config?.foundry?.username || ""),
+        });
+      } catch (e) {
+        this.log.warn("fvtt", `chat poll failed: ${e?.message || e}`);
+        this._trace("fvtt.chat.poll.error", { error: e });
         continue;
       }
+      if (!chat?.ok) continue;
 
-      // Trigger: message mentions an NPC name.
-      const hitNpc = resolveNpcForDiscordMessage({
-        content,
-        npcs,
-        defaultNpcId: "",
-        allowSingleNpcFallback: false,
-      });
-      if (!hitNpc) continue;
+      const messages = ensureArray(chat.messages);
+      for (const msg of messages) {
+        const id = String(msg?.id || "");
+        if (!id) continue;
+        if (this._processedFvttMessageIds.has(id)) continue;
+        this._processedFvttMessageIds.add(id);
+        if (this._processedFvttMessageIds.size > 250) {
+          this._processedFvttMessageIds.clear();
+        }
 
-      this._trace("fvtt.chat.inbound", {
-        messageId: id,
-        speaker,
-        content,
-        npcId: hitNpc?.id || "",
-        npcName: hitNpc?.displayName || "",
-      });
+        const msgTs = Number(msg?.timestamp);
+        const hasMsgTs = Number.isFinite(msgTs) && msgTs > 0;
+        if (this._fvttInboundCutoffTs > 0) {
+          if (!hasMsgTs) {
+            this._trace("fvtt.chat.skip", {
+              reason: "missing-timestamp",
+              messageId: id,
+              cutoffTs: this._fvttInboundCutoffTs,
+            });
+            continue;
+          }
+          if (msgTs < this._fvttInboundCutoffTs) {
+            this._trace("fvtt.chat.skip", {
+              reason: "before-runtime-start",
+              messageId: id,
+              messageTs: msgTs,
+              cutoffTs: this._fvttInboundCutoffTs,
+            });
+            continue;
+          }
+        }
 
-      // Queue to keep FVTT actions serialized.
-      await this._enqueueSerialTask((runToken) =>
-        this._handleNpcFvttInbound({ config, npc: hitNpc, speaker, text: content, runToken })
-      ).catch((e) => {
-        if (!this._isRuntimeAbortError(e)) throw e;
-      });
+        const speaker = String(msg?.speaker || "").trim();
+        const content = String(msg?.content || "").trim();
+        if (!content) continue;
+        if (msg?.isRoll) continue;
+        if (isLikelyFvttSystemMessage(content)) continue;
+
+        const speakerLower = safeLower(speaker);
+        if (npcs.some((n) => speakerLower.includes(safeLower(n.displayName || n.id)))) {
+          continue;
+        }
+
+        const hitNpc = resolveNpcForDiscordMessage({
+          content,
+          npcs,
+          defaultNpcId: "",
+          allowSingleNpcFallback: false,
+        });
+        if (!hitNpc) continue;
+
+        this._trace("fvtt.chat.inbound", {
+          messageId: id,
+          speaker,
+          content,
+          npcId: hitNpc?.id || "",
+          npcName: hitNpc?.displayName || "",
+          sessionUser: ensureString(client?.config?.foundry?.username || ""),
+        });
+
+        await this._enqueueSerialTask((runToken) =>
+          this._handleNpcFvttInbound({ config, npc: hitNpc, speaker, text: content, runToken })
+        ).catch((e) => {
+          if (!this._isRuntimeAbortError(e)) throw e;
+        });
+      }
     }
   }
 
@@ -2572,8 +2818,7 @@ class AppRuntime {
 
   async _pollFvttCombatTurns(config) {
     if (!this.started) return;
-    if (!this.fvtt || !config?.foundry?.enabled) return;
-    if (!this.fvtt.isReady()) return;
+    if (!config?.foundry?.enabled) return;
     if (config?.foundry?.combatAutoTurn === false) return;
 
     const npcs = pickEnabledNpcs(config);
@@ -2582,6 +2827,8 @@ class AppRuntime {
     for (const npc of npcs) {
       const npcName = String(npc?.displayName || npc?.id || "NPC");
       const npcKey = String(npc?.id || npcName || "").trim() || `npc:${Math.random().toString(36).slice(2, 8)}`;
+      const fvttClient = this._getFvttClientForNpc(npc);
+      if (!fvttClient?.isReady()) continue;
 
       let state = null;
       try {
@@ -2683,6 +2930,7 @@ class AppRuntime {
     const npcName = String(npc?.displayName || npc?.id || "NPC");
     const turnKey = String(combatState?.turnKey || "").trim();
     let text = buildCombatTurnInboundText({ npcName, combatState });
+    const directorConfig = resolveDirectorConfig({ config, npc });
 
     this._trace("fvtt.combat.turn.handle.start", {
       npcId: npc?.id || "",
@@ -2691,14 +2939,18 @@ class AppRuntime {
       text,
     });
 
-    const personaText = await loadNpcPromptDocs({ config, npc });
+    const [personaText, directorPromptText] = await Promise.all([
+      loadNpcPromptDocs({ config, npc }),
+      loadDirectorPromptText({ config, npc }),
+    ]);
     this._throwIfRuntimeStopped(runToken);
 
     let fvttChatContext = [];
     let fvttSceneContext = null;
     let fvttActorSheet = null;
     try {
-      const chat = await this.fvtt.getRecentChat(10);
+      const fvttClient = await this._ensureFvttClientForNpc(npc, runToken);
+      const chat = await fvttClient.getRecentChat(10);
       if (chat?.ok) fvttChatContext = chat.messages || [];
       this._throwIfRuntimeStopped(runToken);
       fvttSceneContext = await this._getTacticalSceneContext(npc, 60, runToken);
@@ -2739,6 +2991,8 @@ class AppRuntime {
       fvttActorSheet,
       mentionedSceneTokens: ensureArray(combatState?.nearbyHostiles).slice(0, 4),
       imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
+      directorConfig,
+      directorPromptText,
     });
 
     let replyText = "";
@@ -2994,6 +3248,7 @@ class AppRuntime {
   async _handleNpcCombatEnd({ config, npc, prevCombatState, combatState, runToken = 0 }) {
     this._throwIfRuntimeStopped(runToken);
     const npcName = String(npc?.displayName || npc?.id || "NPC");
+    const directorConfig = resolveDirectorConfig({ config, npc });
     this._trace("fvtt.combat.end.handle.start", {
       npcId: npc?.id || "",
       npcName,
@@ -3001,14 +3256,18 @@ class AppRuntime {
       combatState: combatState || null,
     });
 
-    const personaText = await loadNpcPromptDocs({ config, npc });
+    const [personaText, directorPromptText] = await Promise.all([
+      loadNpcPromptDocs({ config, npc }),
+      loadDirectorPromptText({ config, npc }),
+    ]);
     this._throwIfRuntimeStopped(runToken);
     let fvttChatContext = [];
     let fvttSceneContext = null;
     let fvttActorSheet = null;
 
     try {
-      const chat = await this.fvtt.getRecentChat(10);
+      const fvttClient = await this._ensureFvttClientForNpc(npc, runToken);
+      const chat = await fvttClient.getRecentChat(10);
       if (chat?.ok) fvttChatContext = chat.messages || [];
       this._throwIfRuntimeStopped(runToken);
       fvttSceneContext = await this._getTacticalSceneContext(npc, 60, runToken);
@@ -3036,6 +3295,8 @@ class AppRuntime {
       fvttActorSheet,
       mentionedSceneTokens: ensureArray(combatState?.nearbyHostiles).slice(0, 4),
       imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
+      directorConfig,
+      directorPromptText,
     });
 
     let replyText = "";
@@ -3098,6 +3359,7 @@ class AppRuntime {
   async _handleNpcFvttInbound({ config, npc, speaker, text, runToken = 0 }) {
     this._throwIfRuntimeStopped(runToken);
     const npcName = String(npc?.displayName || npc?.id || "NPC");
+    const directorConfig = resolveDirectorConfig({ config, npc });
     this.log.info("fvtt", `inbound -> ${npcName} (speaker=${speaker || "?"}): ${compact(text, 180)}`);
     this._trace("fvtt.inbound.handle.start", {
       npcId: npc?.id || "",
@@ -3106,7 +3368,10 @@ class AppRuntime {
       text: String(text || ""),
     });
 
-    const personaText = await loadNpcPromptDocs({ config, npc });
+    const [personaText, directorPromptText] = await Promise.all([
+      loadNpcPromptDocs({ config, npc }),
+      loadDirectorPromptText({ config, npc }),
+    ]);
     this._throwIfRuntimeStopped(runToken);
 
     // Build FVTT-only context for LLM
@@ -3115,12 +3380,13 @@ class AppRuntime {
     let fvttActorSheet = null;
     let mentionedSceneTokens = [];
     try {
-      const chat = await this.fvtt.getRecentChat(10);
+      const fvttClient = await this._ensureFvttClientForNpc(npc, runToken);
+      const chat = await fvttClient.getRecentChat(10);
       if (chat?.ok) fvttChatContext = chat.messages || [];
       this._throwIfRuntimeStopped(runToken);
       fvttSceneContext = await this._getTacticalSceneContext(npc, 60, runToken);
       fvttActorSheet = await this._withNpcActor(npc, () => this.fvtt.getActorSheet(), { runToken });
-      const sceneTokens = await this.fvtt.listSceneTokens();
+      const sceneTokens = await fvttClient.listSceneTokens();
       if (sceneTokens?.ok) {
         mentionedSceneTokens = collectMentionedSceneTokens({
           text,
@@ -3181,6 +3447,8 @@ class AppRuntime {
       fvttActorSheet,
       mentionedSceneTokens,
       imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
+      directorConfig,
+      directorPromptText,
     });
 
     let replyText = "";
@@ -3351,43 +3619,67 @@ class AppRuntime {
     };
 
     // FVTT diag (connect + basic read)
-    let diagFvtt = null;
-    let diagFvttIsTemp = false;
+    const diagClientsBySessionId = new Map();
+    const diagTempSessionIds = new Set();
     try {
       const enabled = Boolean(config?.foundry?.enabled);
       if (!enabled) {
         result.fvtt = { ok: true, detail: "disabled" };
       } else {
-        diagFvtt = this.fvtt;
-        if (!diagFvtt) {
-          const fvttConfig = {
-            foundry: {
-              url: String(config.foundry.url || "").trim(),
-              username: String(config.foundry.username || "").trim(),
-              password: String(config.foundry.password || "").trim(),
-              headless: true,
-              loginTimeoutMs: Number(config.foundry.loginTimeoutMs || 120_000),
-              autoConnect: false,
-              keepAliveMs: 0,
-              actorId: "",
-              actorName: "",
-            },
-            npc: {
-              difficultTerrainMultiplier: Number(config?.npc?.difficultTerrainMultiplier || 2),
-            },
-          };
-          diagFvtt = new FvttClient(fvttConfig);
-          diagFvttIsTemp = true;
+        const sessionBundle = collectFoundrySessionConfigs(config);
+        const sessionResults = [];
+
+        for (const session of sessionBundle.sessions) {
+          let client = this.fvttClientsBySessionId.get(session.sessionId) || null;
+          if (!client) {
+            client = new FvttClient({
+              foundry: {
+                url: session.url,
+                username: session.username,
+                password: session.password,
+                userId: session.userId,
+                headless: true,
+                loginTimeoutMs: session.loginTimeoutMs,
+                autoConnect: false,
+                keepAliveMs: 0,
+                actorId: "",
+                actorName: "",
+              },
+              npc: {
+                difficultTerrainMultiplier: Number(config?.npc?.difficultTerrainMultiplier || 2),
+              },
+            });
+            diagTempSessionIds.add(session.sessionId);
+          }
+          diagClientsBySessionId.set(session.sessionId, client);
+
+          const connected = await client.ensureConnected();
+          if (!connected.ok) {
+            sessionResults.push({
+              sessionId: session.sessionId,
+              username: session.username,
+              ok: false,
+              detail: connected.error,
+            });
+            continue;
+          }
+          const chat = await client.getRecentChat(5);
+          sessionResults.push({
+            sessionId: session.sessionId,
+            username: session.username,
+            ok: Boolean(chat?.ok),
+            detail: chat?.ok ? "connected + chat ok" : chat?.error || "",
+          });
         }
 
-        const connected = await diagFvtt.ensureConnected();
-        if (!connected.ok) {
-          result.fvtt = { ok: false, detail: connected.error };
-        } else {
-          // Basic: can we read chat?
-          const chat = await diagFvtt.getRecentChat(5);
-          result.fvtt = { ok: Boolean(chat?.ok), detail: chat?.ok ? "connected + chat ok" : chat?.error || "" };
-        }
+        result.fvtt = {
+          ok: sessionResults.length > 0 && sessionResults.every((entry) => entry.ok),
+          detail:
+            sessionResults.length > 0
+              ? sessionResults.map((entry) => `${entry.sessionId}:${entry.ok ? "ok" : entry.detail || "failed"}`).join(", ")
+              : "no valid foundry sessions configured",
+          sessions: sessionResults,
+        };
       }
     } catch (e) {
       result.fvtt = { ok: false, detail: e?.message || String(e) };
@@ -3432,12 +3724,19 @@ class AppRuntime {
     // NPC diag (requires FVTT)
     if (result.fvtt.ok && config?.foundry?.enabled) {
       const npcChecks = [];
+      const sessionBundle = collectFoundrySessionConfigs(config);
       for (const npc of npcs) {
         const entry = { id: npc.id, name: npc.displayName, ok: false, detail: "" };
         try {
+          const sessionId = resolveNpcFoundrySessionId({
+            npc,
+            sessionConfigs: sessionBundle.sessions,
+            defaultSessionId: sessionBundle.defaultSessionId,
+          });
+          const diagFvtt = diagClientsBySessionId.get(sessionId) || null;
           if (!diagFvtt) {
             entry.ok = false;
-            entry.detail = "fvtt not available";
+            entry.detail = `fvtt session unavailable (${sessionId || "default"})`;
           } else {
             const status = await withNpcActorOnClient(diagFvtt, npc, () => diagFvtt.getStatus());
             if (!status?.ok) {
@@ -3445,7 +3744,7 @@ class AppRuntime {
               entry.detail = status?.error || "status failed";
             } else {
               entry.ok = true;
-              entry.detail = `scene=${status.scene?.name || "-"} token=${status.token?.name || "-"}`;
+              entry.detail = `session=${sessionId || "default"} scene=${status.scene?.name || "-"} token=${status.token?.name || "-"}`;
             }
           }
         } catch (e) {
@@ -3457,8 +3756,9 @@ class AppRuntime {
       result.npcChecks = npcChecks;
     }
 
-    if (diagFvtt && diagFvttIsTemp) {
-      await diagFvtt.close().catch(() => {});
+    for (const [sessionId, client] of diagClientsBySessionId.entries()) {
+      if (!diagTempSessionIds.has(sessionId)) continue;
+      await client.close().catch(() => {});
     }
 
     return result;
@@ -3549,20 +3849,23 @@ class AppRuntime {
 
   async _withNpcActor(npc, fn, { runToken = 0 } = {}) {
     this._throwIfRuntimeStopped(runToken);
-    if (!this.fvtt) throw new Error("FVTT not configured");
+    const fvttClient = await this._ensureFvttClientForNpc(npc, runToken);
     const sel = actorSelectorForNpc(npc);
-    const foundry = this.fvtt.config.foundry;
+    const foundry = fvttClient.config.foundry;
+    const prevClient = this.fvtt;
     const prevId = foundry.actorId;
     const prevName = foundry.actorName;
+    this.fvtt = fvttClient;
     foundry.actorId = sel.actorId;
     foundry.actorName = sel.actorName;
     try {
-      const result = await fn();
+      const result = await fn(fvttClient);
       this._throwIfRuntimeStopped(runToken);
       return result;
     } finally {
       foundry.actorId = prevId;
       foundry.actorName = prevName;
+      this.fvtt = prevClient;
     }
   }
 
@@ -4154,6 +4457,7 @@ class AppRuntime {
   async _handleNpcDiscordMessage({ config, npc, message, text, runToken = 0 }) {
     this._throwIfRuntimeStopped(runToken);
     const npcName = String(npc?.displayName || npc?.id || "NPC");
+    const directorConfig = resolveDirectorConfig({ config, npc });
     this.log.info("discord", `inbound -> ${npcName}: ${compact(text, 180)}`);
     this._trace("discord.handle.start", {
       npcId: npc?.id || "",
@@ -4172,8 +4476,9 @@ class AppRuntime {
     let fvttActorSheet = null;
     let mentionedSceneTokens = [];
 
-    if (this.fvtt && config?.foundry?.enabled) {
-      const connected = await this.fvtt.ensureConnected();
+    const fvttClient = config?.foundry?.enabled ? this._getFvttClientForNpc(npc) : null;
+    if (fvttClient && config?.foundry?.enabled) {
+      const connected = await fvttClient.ensureConnected();
       this._throwIfRuntimeStopped(runToken);
       fvttReady = Boolean(connected.ok);
       this._trace("fvtt.ensureConnected", {
@@ -4185,7 +4490,7 @@ class AppRuntime {
       if (fvttReady) {
         // Pull context.
         try {
-          const chat = await this.fvtt.getRecentChat(10);
+          const chat = await fvttClient.getRecentChat(10);
           this._throwIfRuntimeStopped(runToken);
           if (chat?.ok) fvttChatContext = chat.messages || [];
         } catch (e) {
@@ -4216,7 +4521,7 @@ class AppRuntime {
 
       if (fvttReady) {
         try {
-          const sceneTokens = await this.fvtt.listSceneTokens();
+          const sceneTokens = await fvttClient.listSceneTokens();
           this._throwIfRuntimeStopped(runToken);
           if (sceneTokens?.ok) {
             mentionedSceneTokens = collectMentionedSceneTokens({
@@ -4271,7 +4576,10 @@ class AppRuntime {
       return;
     }
 
-    const personaText = await loadNpcPromptDocs({ config, npc });
+    const [personaText, directorPromptText] = await Promise.all([
+      loadNpcPromptDocs({ config, npc }),
+      loadDirectorPromptText({ config, npc }),
+    ]);
     this._throwIfRuntimeStopped(runToken);
 
     let replyText = "";
@@ -4288,6 +4596,8 @@ class AppRuntime {
       fvttActorSheet,
       mentionedSceneTokens,
       imageGeneration: normalizeNpcImageGenerationState({ config, npc }),
+      directorConfig,
+      directorPromptText,
     });
 
     try {
@@ -4645,7 +4955,8 @@ class AppRuntime {
         return { ok: true, moveConsumed: false };
       }
       if (what === "chatlog") {
-        const log = await this.fvtt.getRecentChat(10);
+        const fvttClient = await this._ensureFvttClientForNpc(npc, runToken);
+        const log = await fvttClient.getRecentChat(10);
         this.log.info("fvtt", `chatlog ok=${log?.ok}`);
         this._trace("fvtt.inspect.result", { npcId: npc?.id || "", what, result: log });
         return { ok: true, moveConsumed: false };
@@ -5017,5 +5328,10 @@ class AppRuntime {
   }
 }
 
-module.exports = { AppRuntime };
+module.exports = {
+  AppRuntime,
+  collectFoundrySessionConfigs,
+  resolveDirectorConfig,
+  resolveNpcFoundrySessionId,
+};
 

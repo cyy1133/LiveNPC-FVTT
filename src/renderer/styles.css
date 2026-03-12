@@ -175,6 +175,7 @@ main {
 }
 
 .field input,
+.field textarea,
 .field select {
   font-family: var(--mono);
   font-size: 12px;
@@ -187,6 +188,7 @@ main {
 }
 
 .field input:focus,
+.field textarea:focus,
 .field select:focus {
   border-color: rgba(242, 185, 75, 0.45);
 }
@@ -438,6 +440,8 @@ main {
 }
 
 .npc-card input[type="text"],
+.npc-card input[type="number"],
+.npc-card select,
 .md-editor-text {
   font-family: var(--mono);
   font-size: 12px;
@@ -450,6 +454,8 @@ main {
 }
 
 .npc-card input[type="text"]:focus,
+.npc-card input[type="number"]:focus,
+.npc-card select:focus,
 .md-editor-text:focus {
   border-color: rgba(242, 185, 75, 0.45);
 }

@@ -7,6 +7,7 @@
   },
   "foundry": {
     "enabled": true,
+    "defaultSessionId": "gm",
     "url": "https://your-foundry.example",
     "username": "YOUR_FVTT_USERNAME",
     "password": "YOUR_FVTT_PASSWORD",
@@ -15,7 +16,17 @@
     "autoConnect": true,
     "keepAliveMs": 30000,
     "pollChatEveryMs": 1200,
-    "combatAutoTurn": true
+    "combatAutoTurn": true,
+    "sessions": [
+      {
+        "id": "absent-player-1",
+        "label": "Absent Player 1",
+        "username": "PLAYER_1_USERNAME",
+        "password": "PLAYER_1_PASSWORD",
+        "userId": "",
+        "autoConnect": false
+      }
+    ]
   },
   "llm": {
     "provider": "codex-cli",
@@ -57,6 +68,22 @@
     "sharedDocs": {
       "world": ".\\persona-defaults\\world.md",
       "battleRules": ".\\persona-defaults\\dnd5e-battle-rules.md"
+    },
+    "director": {
+      "enabled": false,
+      "mode": "nearby",
+      "promptFile": ".\\persona-defaults\\director.md",
+      "allowAmbientTalk": true,
+      "allowNpcToNpc": true,
+      "playerNearbyFt": 30,
+      "maxChainTurns": 2,
+      "maxParticipants": 3,
+      "npcCooldownMs": 45000,
+      "sceneCooldownMs": 15000,
+      "tokenBudgetPerWindow": 8,
+      "tokenBudgetWindowMs": 600000,
+      "lineDelayMinMs": 300,
+      "lineDelayMaxMs": 900
     }
   },
   "npcs": [
@@ -79,6 +106,21 @@
       "triggers": {
         "minFt": 2,
         "maxFt": 30
+      },
+      "foundry": {
+        "sessionId": "gm",
+        "userId": "",
+        "username": ""
+      },
+      "director": {
+        "enabled": null,
+        "allowAmbientTalk": null,
+        "allowNpcToNpc": null,
+        "socialWeight": 1,
+        "playerNearbyFt": null,
+        "npcCooldownMs": null,
+        "promptFile": "",
+        "promptText": ""
       },
       "image": {
         "enabled": false,
