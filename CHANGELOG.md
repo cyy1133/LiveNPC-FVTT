@@ -1,4 +1,28 @@
-﻿# Changelog
+# Changelog
+
+## Unreleased - 2026-03-12
+
+### Added
+
+- `소셜 연기` 탭 추가
+- `Director`와 `Ambient Chatter`를 별도 on/off로 관리하는 글로벌 설정 추가
+- `@NPC 이름: doing something` 형식의 World Activity 입력 지원
+- Scene ID / Scene Name 기준 social preset 자동 매칭
+- social preset `Capture Current / Apply / Export / Import` 지원
+- NPC별 `FVTT Ownership / Session` 지정과 multi-session routing 지원
+- NPC별 social weight와 director override 지원
+- director follow-up orchestration 및 ambient chatter polling smoke test 추가
+
+### Changed
+
+- README와 Quickstart를 social director, ambient chatter, preset, multi-session 기준으로 재정리
+- 릴리스 문안과 데모 촬영 체크리스트를 최신 기능 기준으로 갱신
+- 내부 설계 메모에 소셜 연기와 직렬 실행 원칙 설명 추가
+
+### Fixed
+
+- 비전투 장면 준비를 맵별로 반복 입력해야 하던 운영 불편을 preset import/export로 완화
+- 결석 플레이어/다중 ownership 운영 시 세션 라우팅이 분산되지 않던 설정 공백을 UI로 보완
 
 ## 0.1.0 - 2026-03-11
 

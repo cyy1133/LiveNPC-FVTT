@@ -9,3 +9,4 @@ secrets.json
 *.log
 runtime-trace-*.ndjson
 *.pid
+private-notes/
