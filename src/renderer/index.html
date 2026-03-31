@@ -187,7 +187,14 @@
           </div>
         </div>
 
+        <div class="sub-tabs social-sub-tabs">
+          <button class="sub-tab-btn active" type="button" data-social-tab-btn="simple">Quick Director</button>
+          <button class="sub-tab-btn" type="button" data-social-tab-btn="storybook">Node Storybook</button>
+          <button class="sub-tab-btn" type="button" data-social-tab-btn="status">Live Status</button>
+        </div>
+
         <div class="social-grid">
+          <div class="social-tab-content active" data-social-tab-content="simple">
           <section class="social-section">
             <h3>Director</h3>
             <div class="form-grid">
@@ -354,6 +361,270 @@
               Runtime auto-matches presets by `Scene ID` first, then `Scene Name`. `Import Preset` also applies it immediately for DM prep.
             </div>
           </section>
+          </div>
+
+          <div class="social-tab-content" data-social-tab-content="storybook">
+          <section class="social-section storybook-section" id="storybook-section">
+            <div class="row" style="margin-bottom: 6px">
+              <h3 style="margin: 0">Node Storybook</h3>
+              <div class="row-actions">
+                <button id="btn-storybook-graph-new" type="button">New Graph</button>
+                <button id="btn-storybook-graph-delete" type="button" class="danger">Delete Graph</button>
+                <button id="btn-storybook-node-new" type="button">New Node</button>
+                <button id="btn-storybook-node-delete" type="button" class="danger">Delete Node</button>
+                <button id="btn-storybook-transition-new" type="button">New Transition</button>
+                <button id="btn-storybook-transition-delete" type="button" class="danger">Delete Transition</button>
+              </div>
+            </div>
+            <div class="form-grid storybook-global-grid">
+              <div class="field checkbox">
+                <label>
+                  <input id="f-storybook-enabled" type="checkbox" />
+                  Enable advanced supervisor layer
+                </label>
+              </div>
+              <div class="field">
+                <label for="f-storybook-mode">Story Mode</label>
+                <select id="f-storybook-mode">
+                  <option value="simple">Simple Director</option>
+                  <option value="node-storybook">Node Storybook</option>
+                </select>
+              </div>
+              <div class="field" style="grid-column: 1 / -1">
+                <label for="f-storybook-prompt-file">Storybook Prompt File (.md)</label>
+                <div class="file-row">
+                  <input id="f-storybook-prompt-file" type="text" placeholder="C:\\docs\\storybook.md" />
+                  <button id="btn-storybook-prompt-pick" type="button">Select</button>
+                  <button id="btn-storybook-prompt-edit" type="button">Edit</button>
+                </div>
+              </div>
+              <div class="field" style="grid-column: 1 / -1">
+                <label for="f-storybook-prompt-text">Storybook Prompt Inline Addendum</label>
+                <textarea
+                  id="f-storybook-prompt-text"
+                  class="npc-textarea"
+                  placeholder="Optional note for the supervisor layer that coordinates the current story node."
+                ></textarea>
+              </div>
+            </div>
+
+            <div class="storybook-mode-note" id="storybook-mode-note">
+              <strong>Simple Director</strong> keeps today's social director behavior.
+              <span class="muted">Switch to Node Storybook only when you want scene states, node transitions, and scripted escalation.</span>
+            </div>
+
+            <div class="form-grid storybook-template-grid">
+              <div class="field">
+                <label for="f-storybook-template">Starter Template</label>
+                <select id="f-storybook-template">
+                  <option value="guard-shift">Guard Shift</option>
+                  <option value="patrol-alert">Patrol Alert</option>
+                  <option value="tavern-rumor">Tavern Rumor</option>
+                </select>
+              </div>
+              <div class="field" style="justify-content: end">
+                <label>&nbsp;</label>
+                <button id="btn-storybook-template-create" type="button">Create From Template</button>
+              </div>
+            </div>
+
+            <div class="storybook-layout">
+              <div class="storybook-column">
+                <div class="row" style="margin-bottom: 6px">
+                  <h4 style="margin: 0">Scene Graph</h4>
+                  <div class="row-actions">
+                    <button id="btn-storybook-graph-add" type="button">Add Graph</button>
+                  </div>
+                </div>
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="f-storybook-graph-select">Selected Graph</label>
+                    <select id="f-storybook-graph-select"></select>
+                  </div>
+                  <div class="field">
+                    <label for="f-storybook-graph-label">Graph Label</label>
+                    <input id="f-storybook-graph-label" type="text" placeholder="Goblin Guard Shift" />
+                  </div>
+                  <div class="field checkbox">
+                    <label>
+                      <input id="f-storybook-graph-enabled" type="checkbox" />
+                      Graph enabled
+                    </label>
+                  </div>
+                  <div class="field">
+                    <label for="f-storybook-graph-scene-id">Scene ID Match</label>
+                    <input id="f-storybook-graph-scene-id" type="text" placeholder="fvtt-scene-id" />
+                  </div>
+                  <div class="field">
+                    <label for="f-storybook-graph-scene-name">Scene Name Match</label>
+                    <input id="f-storybook-graph-scene-name" type="text" placeholder="Goblin Cave Entrance" />
+                  </div>
+                  <div class="field">
+                    <label for="f-storybook-graph-entry-node-id">Entry Node</label>
+                    <select id="f-storybook-graph-entry-node-id"></select>
+                  </div>
+                  <div class="field" style="grid-column: 1 / -1">
+                    <label for="f-storybook-graph-notes">Graph Notes</label>
+                    <textarea
+                      id="f-storybook-graph-notes"
+                      class="npc-textarea"
+                      placeholder="Short description of what this scene is trying to stage."
+                    ></textarea>
+                  </div>
+                </div>
+              </div>
+
+              <div class="storybook-column">
+                <div class="row" style="margin-bottom: 6px">
+                  <h4 style="margin: 0">Story Node</h4>
+                  <div class="row-actions">
+                    <button id="btn-storybook-node-add" type="button">Add Node</button>
+                  </div>
+                </div>
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="f-storybook-node-select">Selected Node</label>
+                    <select id="f-storybook-node-select"></select>
+                  </div>
+                  <div class="field">
+                    <label for="f-storybook-node-label">Node Label</label>
+                    <input id="f-storybook-node-label" type="text" placeholder="Shift Chat" />
+                  </div>
+                  <div class="field checkbox">
+                    <label>
+                      <input id="f-storybook-node-enabled" type="checkbox" />
+                      Node enabled
+                    </label>
+                  </div>
+                  <div class="field">
+                    <label for="f-storybook-node-id">Node Id</label>
+                    <input id="f-storybook-node-id" type="text" placeholder="shift-chat" />
+                  </div>
+                  <div class="field" style="grid-column: 1 / -1">
+                    <label for="f-storybook-node-npc-ids">Assigned NPC Ids (one per line)</label>
+                    <textarea
+                      id="f-storybook-node-npc-ids"
+                      class="npc-textarea storybook-compact-textarea"
+                      placeholder="goblin-a&#10;goblin-b"
+                    ></textarea>
+                  </div>
+                  <div class="field" style="grid-column: 1 / -1">
+                    <label for="f-storybook-node-objective-text">Objective</label>
+                    <textarea
+                      id="f-storybook-node-objective-text"
+                      class="npc-textarea"
+                      placeholder="What should these NPCs be doing or communicating in this beat?"
+                    ></textarea>
+                  </div>
+                  <div class="field" style="grid-column: 1 / -1">
+                    <label for="f-storybook-node-stage-directions">Stage Directions</label>
+                    <textarea
+                      id="f-storybook-node-stage-directions"
+                      class="npc-textarea"
+                      placeholder="Tone, pacing, focus, constraints, and what should remain true during this node."
+                    ></textarea>
+                  </div>
+                </div>
+              </div>
+
+              <div class="storybook-column">
+                <div class="row" style="margin-bottom: 6px">
+                  <h4 style="margin: 0">Transition Rule</h4>
+                  <div class="row-actions">
+                    <button id="btn-storybook-transition-add" type="button">Add Transition</button>
+                  </div>
+                </div>
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="f-storybook-transition-select">Selected Transition</label>
+                    <select id="f-storybook-transition-select"></select>
+                  </div>
+                  <div class="field">
+                    <label for="f-storybook-transition-label">Transition Label</label>
+                    <input id="f-storybook-transition-label" type="text" placeholder="Player visible" />
+                  </div>
+                  <div class="field">
+                    <label for="f-storybook-transition-next-node-id">Next Node</label>
+                    <select id="f-storybook-transition-next-node-id"></select>
+                  </div>
+                  <div class="field">
+                    <label for="f-storybook-transition-condition-type">Quick Trigger</label>
+                    <select id="f-storybook-transition-condition-type">
+                      <option value="always">Always</option>
+                      <option value="combat-started">Combat Started</option>
+                      <option value="combat-ended">Combat Ended</option>
+                      <option value="player-nearby">Player Nearby</option>
+                      <option value="player-visible">Player Visible</option>
+                      <option value="active-node-timeout">Node Timeout</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="f-storybook-transition-condition-distance-ft">Range (ft)</label>
+                    <input id="f-storybook-transition-condition-distance-ft" type="number" min="0" step="1" placeholder="30" />
+                  </div>
+                  <div class="field">
+                    <label for="f-storybook-transition-condition-timeout-seconds">Timeout (sec)</label>
+                    <input id="f-storybook-transition-condition-timeout-seconds" type="number" min="0" step="1" placeholder="10" />
+                  </div>
+                  <div class="field checkbox">
+                    <label>
+                      <input id="f-storybook-transition-advanced-enabled" type="checkbox" />
+                      Use advanced JSON conditions
+                    </label>
+                  </div>
+                  <div class="field storybook-advanced-field" style="grid-column: 1 / -1">
+                    <label for="f-storybook-transition-conditions">Advanced Conditions (JSON array)</label>
+                    <textarea
+                      id="f-storybook-transition-conditions"
+                      class="npc-textarea"
+                      placeholder='[{"type":"player-visible","distanceFt":30}]'
+                    ></textarea>
+                  </div>
+                </div>
+                <div class="hint">
+                  Quick Trigger covers the common cases. Turn on `advanced JSON` only when you need multiple conditions or special thresholds.
+                </div>
+              </div>
+            </div>
+
+            <div class="storybook-preview">
+              <h4 style="margin: 0 0 8px 0">Preview</h4>
+              <div id="storybook-graph-visual" class="storybook-graph-visual"></div>
+              <pre id="storybook-preview-summary" class="storybook-preview-summary"></pre>
+            </div>
+
+            <div class="hint">
+              `Simple Director` keeps today's social director behavior. `Node Storybook` adds scene-matched graphs with active nodes and automatic transitions.
+            </div>
+            <div class="hint">
+              This editor prefers forms and dropdowns over a freeform canvas. The goal is easy scene authoring first, not a complicated graph tool.
+            </div>
+          </section>
+          </div>
+
+          <div class="social-tab-content" data-social-tab-content="status">
+            <section class="social-section">
+              <h3>Execution Status</h3>
+              <div class="hint" style="margin-top: 0">
+                This panel shows which Storybook graph is currently active in the running runtime. Use it to confirm scene matching,
+                active nodes, and recent automatic transitions.
+              </div>
+              <div class="social-status-grid">
+                <div class="social-status-card">
+                  <h4 style="margin: 0 0 8px 0">Runtime Summary</h4>
+                  <div id="social-status-summary" class="social-status-summary">Loading...</div>
+                </div>
+                <div class="social-status-card">
+                  <h4 style="margin: 0 0 8px 0">Active Scene States</h4>
+                  <div id="social-status-scenes" class="social-status-list"></div>
+                </div>
+                <div class="social-status-card">
+                  <h4 style="margin: 0 0 8px 0">Recent Storybook Transitions</h4>
+                  <div id="social-status-transitions" class="social-status-list"></div>
+                </div>
+              </div>
+            </section>
+          </div>
         </div>
       </section>
 

@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld("api", {
   startRuntime: () => ipcRenderer.invoke("runtime:start"),
   stopRuntime: () => ipcRenderer.invoke("runtime:stop"),
   getNpcVisuals: (config) => ipcRenderer.invoke("runtime:getNpcVisuals", { config }),
+  getSocialStatus: (config) => ipcRenderer.invoke("runtime:getSocialStatus", { config }),
   runDiagnostics: () => ipcRenderer.invoke("diagnostics:runAll"),
   openExternal: (url) => ipcRenderer.invoke("openExternal", { url }),
   onLog: (handler) => {

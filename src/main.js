@@ -100,6 +100,13 @@ ipcMain.handle("runtime:getNpcVisuals", async (_evt, { config } = {}) => {
   return rt.getNpcVisuals({ config: nextConfig });
 });
 
+ipcMain.handle("runtime:getSocialStatus", async (_evt, { config } = {}) => {
+  const configPath = getDefaultConfigPath(app.getPath("userData"));
+  const nextConfig = config && typeof config === "object" ? config : await loadAppConfig(configPath);
+  const rt = ensureRuntime();
+  return rt.getSocialStatus({ config: nextConfig });
+});
+
 ipcMain.handle("diagnostics:runAll", async () => {
   const configPath = getDefaultConfigPath(app.getPath("userData"));
   const config = await loadAppConfig(configPath);

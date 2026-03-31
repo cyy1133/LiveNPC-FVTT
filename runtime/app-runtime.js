@@ -52,6 +52,167 @@ function ensureArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function normalizeStorybookMode(value) {
+  const raw = safeLower(value);
+  if (raw === "off" || raw === "disabled") return "off";
+  if (raw === "node" || raw === "graph" || raw === "node-storybook" || raw === "storybook") return "node-storybook";
+  return "simple";
+}
+
+function normalizeStorybookConditionType(value) {
+  const raw = safeLower(value);
+  if (!raw || raw === "always" || raw === "true") return "always";
+  if (raw === "combat-start" || raw === "combatstarted" || raw === "combat-started") return "combat-started";
+  if (raw === "combat-end" || raw === "combatended" || raw === "combat-ended") return "combat-ended";
+  if (raw === "playernearby" || raw === "player-nearby" || raw === "nearby-player") return "player-nearby";
+  if (raw === "playervisible" || raw === "player-visible" || raw === "seen-by-player") return "player-visible";
+  if (raw === "timeout" || raw === "active-node-timeout" || raw === "node-timeout") return "active-node-timeout";
+  return raw || "always";
+}
+
+function normalizeStorybookCondition(rawCondition, index = 0) {
+  const condition = isPlainObject(rawCondition) ? rawCondition : {};
+  const out = {
+    id: ensureString(condition.id || condition.conditionId || `condition-${index + 1}`),
+    label: ensureString(condition.label || condition.name || condition.type || `Condition ${index + 1}`),
+    type: normalizeStorybookConditionType(condition.type || condition.kind || condition.when),
+  };
+  for (const key of ["ft", "distanceFt", "rangeFt", "radiusFt", "ms", "timeoutMs", "seconds", "minutes", "value", "threshold", "durationMs"]) {
+    if (Number.isFinite(Number(condition[key]))) {
+      out[key] = Math.max(0, Number(condition[key]));
+    }
+  }
+  if (String(condition.text || "").trim()) out.text = String(condition.text).trim();
+  return out;
+}
+
+function normalizeStorybookTransition(rawTransition, index = 0) {
+  const transition = isPlainObject(rawTransition) ? rawTransition : {};
+  const out = {
+    id: ensureString(transition.id || transition.transitionId || `transition-${index + 1}`),
+    label: ensureString(transition.label || transition.name || transition.nextNodeId || `Transition ${index + 1}`),
+    nextNodeId: ensureString(transition.nextNodeId || transition.nextNode || transition.targetNodeId || ""),
+    conditions: ensureArray(transition.conditions)
+      .map((condition, conditionIndex) => normalizeStorybookCondition(condition, conditionIndex))
+      .filter((condition) => Boolean(condition?.type)),
+  };
+  if (String(transition.note || "").trim()) out.note = String(transition.note).trim();
+  return out;
+}
+
+function normalizeStorybookNode(rawNode, index = 0) {
+  const node = isPlainObject(rawNode) ? rawNode : {};
+  const out = {
+    id: ensureString(node.id || node.nodeId || `node-${index + 1}`),
+    label: ensureString(node.label || node.name || node.nodeName || `Node ${index + 1}`),
+    enabled: node.enabled !== false,
+    npcIds: ensureArray(node.npcIds || node.npcIdList || node.actors)
+      .map((value) => ensureString(value || "").trim())
+      .filter(Boolean),
+    objectiveText: String(node.objectiveText || node.objective || ""),
+    stageDirections: String(node.stageDirections || node.directions || ""),
+    transitions: ensureArray(node.transitions)
+      .map((transition, transitionIndex) => normalizeStorybookTransition(transition, transitionIndex))
+      .filter((transition) => Boolean(transition.nextNodeId)),
+  };
+  if (String(node.notes || "").trim()) out.notes = String(node.notes).trim();
+  return out;
+}
+
+function normalizeStorybookGraph(rawGraph, index = 0) {
+  const graph = isPlainObject(rawGraph) ? rawGraph : {};
+  const out = {
+    id: ensureString(graph.id || graph.graphId || `graph-${index + 1}`),
+    label: ensureString(graph.label || graph.name || graph.sceneName || graph.sceneId || `Graph ${index + 1}`),
+    enabled: graph.enabled !== false,
+    sceneId: String(graph.sceneId || graph.mapId || ""),
+    sceneName: String(graph.sceneName || graph.mapName || ""),
+    entryNodeId: String(graph.entryNodeId || graph.entryNode || ""),
+    notes: String(graph.notes || graph.description || ""),
+    nodes: ensureArray(graph.nodes)
+      .map((node, nodeIndex) => normalizeStorybookNode(node, nodeIndex))
+      .filter((node) => Boolean(node.id)),
+  };
+  if (!out.entryNodeId && out.nodes[0]?.id) {
+    out.entryNodeId = String(out.nodes[0].id || "");
+  }
+  return out;
+}
+
+function normalizeStorybookSnapshot(rawStorybook, fallback = null) {
+  const storybook = isPlainObject(rawStorybook) ? rawStorybook : {};
+  const base = isPlainObject(fallback) ? fallback : {};
+  const graphs = ensureArray(storybook.graphs || base.graphs)
+    .map((graph, index) => normalizeStorybookGraph(graph, index))
+    .filter((graph) => Boolean(graph.id));
+  return {
+    enabled: hasOwn(storybook, "enabled") ? storybook.enabled === true : base.enabled === true,
+    mode: normalizeStorybookMode(storybook.mode || base.mode || "simple"),
+    promptFile:
+      hasOwn(storybook, "promptFile") || hasOwn(storybook, "promptPath")
+        ? ensureString(storybook.promptFile || storybook.promptPath || "")
+        : ensureString(base.promptFile || base.promptPath || ""),
+    promptText: hasOwn(storybook, "promptText") ? String(storybook.promptText || "") : String(base.promptText || ""),
+    graphs,
+  };
+}
+
+function normalizeGlobalStorybookConfig(config) {
+  const npcCfg = isPlainObject(config?.npc) ? config.npc : {};
+  const storybook = isPlainObject(npcCfg?.storybook) ? npcCfg.storybook : {};
+  return normalizeStorybookSnapshot(storybook);
+}
+
+function resolveStorybookGraphForScene({ config, sceneContext } = {}) {
+  const storybook = normalizeGlobalStorybookConfig(config);
+  if (!storybook.enabled) return null;
+  const sceneId = safeLower(ensureString(sceneContext?.scene?.id || ""));
+  const sceneName = normalizeTokenKey(sceneContext?.scene?.name || "") || safeLower(ensureString(sceneContext?.scene?.name || ""));
+  if (!sceneId && !sceneName) return null;
+
+  let fallback = null;
+  for (const graph of ensureArray(storybook.graphs)) {
+    if (!graph?.enabled) continue;
+    const graphId = safeLower(ensureString(graph?.sceneId || ""));
+    const graphName = normalizeTokenKey(graph?.sceneName || "") || safeLower(ensureString(graph?.sceneName || ""));
+    if (sceneId && graphId && sceneId === graphId) return graph;
+    if (!fallback && sceneName && graphName && sceneName === graphName) {
+      fallback = graph;
+    }
+  }
+  return fallback;
+}
+
+function resolveStorybookGraphNode(graph, nodeId) {
+  const graphNodes = ensureArray(graph?.nodes);
+  const wanted = safeLower(ensureString(nodeId || ""));
+  if (wanted) {
+    const hit = graphNodes.find((node) => safeLower(ensureString(node?.id || "")) === wanted);
+    if (hit) return hit;
+  }
+  if (wanted && graph?.entryNodeId) {
+    const entryHit = graphNodes.find((node) => safeLower(ensureString(node?.id || "")) === safeLower(ensureString(graph.entryNodeId)));
+    if (entryHit) return entryHit;
+  }
+  return graphNodes.find((node) => node?.enabled !== false) || null;
+}
+
+function getStorybookAllowedNpcKeys(sceneContext) {
+  const storybook = isPlainObject(sceneContext?.storybook) ? sceneContext.storybook : null;
+  const node = isPlainObject(storybook?.activeNode) ? storybook.activeNode : null;
+  const npcIds = ensureArray(node?.npcIds).map((value) => normalizeTokenKey(value)).filter(Boolean);
+  return new Set(npcIds);
+}
+
+function isNpcAllowedByStorybook(sceneContext, npc) {
+  const gate = getStorybookAllowedNpcKeys(sceneContext);
+  if (!gate.size) return true;
+  const keys = [npc?.id, npc?.displayName, npc?.actor?.value]
+    .map((value) => normalizeTokenKey(value))
+    .filter(Boolean);
+  return keys.some((key) => gate.has(key));
+}
+
 function ensureString(value, fallback = "") {
   return String(value ?? fallback).trim();
 }
@@ -442,16 +603,35 @@ function parseWorldStateText(text) {
   };
 }
 
-function resolveNpcWorldState({ config, npc, sceneContext } = {}) {
+function resolveNpcWorldState({ config, npc, sceneContext, storybook = null } = {}) {
   const { preset, text } = resolveWorldStateText({ config, sceneContext });
   const parsed = parseWorldStateText(text);
   const npcKey = normalizeTokenKey(npc?.displayName || npc?.id || npc?.actor?.value || "");
+  const storybookState = isPlainObject(storybook) ? storybook : isPlainObject(sceneContext?.storybook) ? sceneContext.storybook : null;
   return {
     presetId: ensureString(preset?.id || ""),
     presetLabel: ensureString(preset?.label || ""),
     generalText: parsed.generalText,
     entries: parsed.npcEntries,
     npcActivity: ensureString(parsed.byNpcKey.get(npcKey) || ""),
+    storybook: storybookState
+      ? {
+          enabled: storybookState.enabled === true,
+          mode: ensureString(storybookState.mode || ""),
+          graphId: ensureString(storybookState.graphId || storybookState.graph?.id || ""),
+          graphLabel: ensureString(storybookState.graphLabel || storybookState.graph?.label || ""),
+          graphNotes: ensureString(storybookState.graphNotes || storybookState.graph?.notes || ""),
+          nodeId: ensureString(storybookState.activeNode?.id || storybookState.nodeId || ""),
+          nodeLabel: ensureString(storybookState.activeNode?.label || storybookState.nodeLabel || ""),
+          objectiveText: ensureString(storybookState.activeNode?.objectiveText || storybookState.objectiveText || ""),
+          stageDirections: ensureString(storybookState.activeNode?.stageDirections || storybookState.stageDirections || ""),
+          npcIds: ensureArray(storybookState.activeNode?.npcIds || storybookState.npcIds || [])
+            .map((value) => ensureString(value || "").trim())
+            .filter(Boolean),
+          transitionReason: ensureString(storybookState.transitionReason || ""),
+          activeSinceTs: Number(storybookState.activeSinceTs || 0),
+        }
+      : null,
   };
 }
 
@@ -714,18 +894,30 @@ async function loadNpcPromptDocs({ config, npc }) {
   return sharedWorld || persona || "";
 }
 
-async function loadDirectorPromptText({ config, npc, sceneContext = null } = {}) {
+async function loadDirectorPromptText({ config, npc, sceneContext = null, storybook = null } = {}) {
   const resolved = resolveDirectorConfig({ config, npc, sceneContext });
-  const inline = String(resolved.promptText || "").trim();
-  if (inline) return inline;
-  return readMaybe(resolved.promptFile);
+  const directorText = String(resolved.promptText || "").trim() || (await readMaybe(resolved.promptFile));
+  const storybookState = isPlainObject(storybook) ? storybook : isPlainObject(sceneContext?.storybook) ? sceneContext.storybook : null;
+  const storybookConfig = normalizeGlobalStorybookConfig(config);
+  const storybookText = storybookState?.enabled
+    ? String(storybookConfig.promptText || "").trim() || (await readMaybe(storybookConfig.promptFile))
+    : "";
+  if (directorText && storybookText) return `${directorText.trim()}\n\n[Storybook]\n${storybookText.trim()}`;
+  if (storybookText) return storybookText.trim();
+  return String(directorText || "").trim();
 }
 
-async function loadAmbientPromptText({ config, sceneContext = null } = {}) {
+async function loadAmbientPromptText({ config, sceneContext = null, storybook = null } = {}) {
   const resolved = resolveAmbientConfig({ config, sceneContext });
-  const inline = String(resolved.promptText || "").trim();
-  if (inline) return inline;
-  return readMaybe(resolved.promptFile);
+  const ambientText = String(resolved.promptText || "").trim() || (await readMaybe(resolved.promptFile));
+  const storybookState = isPlainObject(storybook) ? storybook : isPlainObject(sceneContext?.storybook) ? sceneContext.storybook : null;
+  const storybookConfig = normalizeGlobalStorybookConfig(config);
+  const storybookText = storybookState?.enabled
+    ? String(storybookConfig.promptText || "").trim() || (await readMaybe(storybookConfig.promptFile))
+    : "";
+  if (ambientText && storybookText) return `${ambientText.trim()}\n\n[Storybook]\n${storybookText.trim()}`;
+  if (storybookText) return storybookText.trim();
+  return String(ambientText || "").trim();
 }
 
 async function loadDirectorPersonaNote(npc) {
@@ -2055,6 +2247,26 @@ function formatDetailedSceneContext(sceneContext) {
     lines.push("- self token: not on this scene");
   }
 
+  const storybook = isPlainObject(sceneContext?.storybook) ? sceneContext.storybook : null;
+  if (storybook?.enabled && isPlainObject(storybook?.activeNode)) {
+    const storyNpcIds = ensureArray(storybook.activeNode?.npcIds).filter(Boolean);
+    lines.push(
+      `- storybook: graph=${storybook.graphLabel || storybook.graphId || "n/a"} node=${storybook.activeNode?.label || storybook.activeNode?.id || "n/a"}`
+    );
+    if (String(storybook.activeNode?.objectiveText || "").trim()) {
+      lines.push(`- story objective: ${compact(String(storybook.activeNode.objectiveText || "").trim(), 260)}`);
+    }
+    if (String(storybook.activeNode?.stageDirections || "").trim()) {
+      lines.push(`- story directions: ${compact(String(storybook.activeNode.stageDirections || "").trim(), 260)}`);
+    }
+    if (storyNpcIds.length) {
+      lines.push(`- story actors: ${storyNpcIds.slice(0, 8).join(", ")}`);
+    }
+    if (String(storybook.transitionReason || "").trim()) {
+      lines.push(`- story transition: ${compact(String(storybook.transitionReason || "").trim(), 180)}`);
+    }
+  }
+
   if (Array.isArray(sceneContext.targets) && sceneContext.targets.length) {
     lines.push(`- current targets: ${sceneContext.targets.map((target) => `${target.name}(${target.id})`).join(", ")}`);
   } else {
@@ -2260,11 +2472,43 @@ function buildNpcPrompt({
   if (String(socialWorldState.presetLabel || "").trim()) {
     worldStateLines.push(`- matched scene preset: ${String(socialWorldState.presetLabel || "").trim()}`);
   }
+  if (String(socialWorldState.storybookLabel || "").trim()) {
+    worldStateLines.push(`- active node storybook: ${String(socialWorldState.storybookLabel || "").trim()}`);
+  }
+  if (String(socialWorldState.storyNodeLabel || "").trim()) {
+    worldStateLines.push(`- active story node: ${String(socialWorldState.storyNodeLabel || "").trim()}`);
+  }
   if (String(socialWorldState.generalText || "").trim()) {
     worldStateLines.push(`- scene prep: ${compact(String(socialWorldState.generalText || "").trim(), 420)}`);
   }
+  if (String(socialWorldState.storyNodeText || "").trim()) {
+    worldStateLines.push(`- current story direction: ${compact(String(socialWorldState.storyNodeText || "").trim(), 420)}`);
+  }
   if (String(socialWorldState.npcActivity || "").trim()) {
     worldStateLines.push(`- your current activity: ${compact(String(socialWorldState.npcActivity || "").trim(), 220)}`);
+  }
+  if (String(socialWorldState.storyTransitionReason || "").trim()) {
+    worldStateLines.push(`- latest story transition: ${compact(String(socialWorldState.storyTransitionReason || "").trim(), 180)}`);
+  }
+  if (isPlainObject(socialWorldState.storybook) && socialWorldState.storybook.enabled) {
+    const story = socialWorldState.storybook;
+    worldStateLines.push(
+      `- storybook mode: ${String(story.mode || "node-storybook")}`,
+      `- active graph: ${compact(String(story.graphLabel || story.graphId || "n/a"), 120)}`,
+      `- active node: ${compact(String(story.nodeLabel || story.nodeId || "n/a"), 120)}`
+    );
+    if (String(story.objectiveText || "").trim()) {
+      worldStateLines.push(`- node objective: ${compact(String(story.objectiveText || "").trim(), 220)}`);
+    }
+    if (String(story.stageDirections || "").trim()) {
+      worldStateLines.push(`- stage directions: ${compact(String(story.stageDirections || "").trim(), 220)}`);
+    }
+    if (ensureArray(story.npcIds).length) {
+      worldStateLines.push(`- node actors: ${ensureArray(story.npcIds).slice(0, 8).join(", ")}`);
+    }
+    if (String(story.transitionReason || "").trim()) {
+      worldStateLines.push(`- last transition: ${compact(String(story.transitionReason || "").trim(), 180)}`);
+    }
   }
   const npcSelfKeys = new Set([normalizeTokenKey(npcName), normalizeTokenKey(npc?.id), normalizeTokenKey(npc?.actor?.value)].filter(Boolean));
   const otherAssignments = ensureArray(socialWorldState.entries)
@@ -2689,6 +2933,8 @@ class AppRuntime {
     this._directorNpcCooldownUntil = new Map();
     this._directorSceneCooldownUntil = new Map();
     this._ambientChatterPending = false;
+    this._storybookSceneStateBySceneKey = new Map();
+    this._storybookTransitionHistory = [];
 
     this._traceEnabled = false;
     this._traceToUi = false;
@@ -2844,6 +3090,333 @@ class AppRuntime {
     this._directorSceneCooldownUntil.set(key, now + cooldownMs);
   }
 
+  _getStorybookSceneKey(sceneContext) {
+    const sceneId = ensureString(sceneContext?.scene?.id || "");
+    const sceneName = ensureString(sceneContext?.scene?.name || "");
+    return normalizeTokenKey(sceneId) || normalizeTokenKey(sceneName) || safeLower(sceneName) || "";
+  }
+
+  _clearStorybookSceneState(sceneKey = "") {
+    const key = ensureString(sceneKey || "");
+    if (key) {
+      this._storybookSceneStateBySceneKey.delete(key);
+      return;
+    }
+    this._storybookSceneStateBySceneKey.clear();
+  }
+
+  _evaluateStorybookTransitionCondition(condition, context = {}) {
+    const type = normalizeStorybookConditionType(condition?.type);
+    const sceneContext = isPlainObject(context?.sceneContext) ? context.sceneContext : null;
+    const now = Number(context?.now || Date.now());
+    const currentCombatActive = Boolean(context?.currentCombatActive);
+    const previousCombatActive = Boolean(context?.previousCombatActive);
+    const activeSinceTs = Number(context?.activeSinceTs || 0);
+    const tokens = ensureArray(sceneContext?.tokens);
+    const playerTokens = tokens.filter((token) => token?.hasPlayerOwner === true && token?.hidden !== true && !isTokenDeadLike(token));
+    const nearestPlayerDistanceFt = playerTokens.reduce((best, token) => {
+      const distance = Number.isFinite(Number(token?.orthDistanceFt))
+        ? Number(token.orthDistanceFt)
+        : Number(token?.distanceFt);
+      if (!Number.isFinite(distance)) return best;
+      if (!Number.isFinite(best)) return distance;
+      return Math.min(best, distance);
+    }, Number.POSITIVE_INFINITY);
+    const anyPlayerVisible = playerTokens.some((token) => {
+      const tactical = isPlainObject(token?.tactical) ? token.tactical : null;
+      if (tactical) return tactical.visibleFromSelf !== false && tactical.lineOfEffect !== false;
+      return true;
+    });
+
+    if (type === "always") {
+      return { pass: true, reason: "always" };
+    }
+    if (type === "combat-started") {
+      return {
+        pass: !previousCombatActive && currentCombatActive,
+        reason: currentCombatActive ? "combat active" : "combat inactive",
+      };
+    }
+    if (type === "combat-ended") {
+      return {
+        pass: previousCombatActive && !currentCombatActive,
+        reason: !currentCombatActive ? "combat ended" : "combat still active",
+      };
+    }
+    if (type === "player-nearby") {
+      const threshold = Math.max(
+        0,
+        Number(
+          condition?.ft ??
+            condition?.distanceFt ??
+            condition?.rangeFt ??
+            condition?.radiusFt ??
+            condition?.value ??
+            30
+        ) || 0
+      );
+      const pass = Number.isFinite(nearestPlayerDistanceFt) && nearestPlayerDistanceFt <= threshold;
+      return {
+        pass,
+        reason: pass
+          ? `nearest player ${Math.round(nearestPlayerDistanceFt)}ft <= ${threshold}ft`
+          : Number.isFinite(nearestPlayerDistanceFt)
+            ? `nearest player ${Math.round(nearestPlayerDistanceFt)}ft > ${threshold}ft`
+            : "no visible player distance",
+      };
+    }
+    if (type === "player-visible") {
+      return {
+        pass: anyPlayerVisible,
+        reason: anyPlayerVisible ? "player visible" : "no visible player",
+      };
+    }
+    if (type === "active-node-timeout") {
+      const thresholdMs = Math.max(
+        0,
+        Number(
+          condition?.ms ??
+            condition?.timeoutMs ??
+            condition?.durationMs ??
+            (Number.isFinite(Number(condition?.seconds)) ? Number(condition.seconds) * 1000 : NaN) ??
+            (Number.isFinite(Number(condition?.minutes)) ? Number(condition.minutes) * 60_000 : NaN) ??
+            condition?.value ??
+            30_000
+        ) || 0
+      );
+      const elapsedMs = Math.max(0, now - activeSinceTs);
+      const pass = thresholdMs > 0 && elapsedMs >= thresholdMs;
+      return {
+        pass,
+        reason: pass ? `elapsed ${Math.round(elapsedMs)}ms >= ${thresholdMs}ms` : `elapsed ${Math.round(elapsedMs)}ms < ${thresholdMs}ms`,
+      };
+    }
+    return { pass: false, reason: `unsupported condition: ${type || "unknown"}` };
+  }
+
+  _evaluateStorybookTransition(transition, context = {}) {
+    if (!isPlainObject(transition)) {
+      return { pass: false, reason: "invalid transition" };
+    }
+    const nextNodeId = ensureString(transition.nextNodeId || "");
+    if (!nextNodeId) return { pass: false, reason: "missing next node" };
+
+    const currentNodeId = ensureString(context?.node?.id || "");
+    if (normalizeTokenKey(nextNodeId) && normalizeTokenKey(nextNodeId) === normalizeTokenKey(currentNodeId)) {
+      return { pass: false, reason: "self-loop ignored" };
+    }
+
+    const conditions = ensureArray(transition.conditions);
+    if (!conditions.length) return { pass: false, reason: "no conditions" };
+
+    const results = conditions.map((condition) => this._evaluateStorybookTransitionCondition(condition, context));
+    const failed = results.find((result) => result.pass !== true);
+    if (failed) {
+      return {
+        pass: false,
+        reason: failed.reason || "condition failed",
+        conditionResults: results,
+      };
+    }
+
+    return {
+      pass: true,
+      reason: results.map((result) => result.reason).filter(Boolean).join("; ") || "matched",
+      conditionResults: results,
+    };
+  }
+
+  _resolveStorybookSceneSnapshot({ config = this._configRef, sceneContext = null, source = "", runToken = 0 } = {}) {
+    this._throwIfRuntimeStopped(runToken);
+    const storybookConfig = normalizeGlobalStorybookConfig(config);
+    if (!storybookConfig.enabled || storybookConfig.mode !== "node-storybook") {
+      const sceneKey = this._getStorybookSceneKey(sceneContext);
+      if (sceneKey) this._clearStorybookSceneState(sceneKey);
+      return null;
+    }
+
+    const sceneKey = this._getStorybookSceneKey(sceneContext);
+    if (!sceneKey) return null;
+
+    const graph = resolveStorybookGraphForScene({ config, sceneContext });
+    if (!graph) {
+      this._clearStorybookSceneState(sceneKey);
+      return null;
+    }
+
+    const now = Date.now();
+    const currentCombatActive = isCombatActiveInSceneContext(sceneContext);
+    const existing = isPlainObject(this._storybookSceneStateBySceneKey.get(sceneKey))
+      ? this._storybookSceneStateBySceneKey.get(sceneKey)
+      : {};
+    const graphChanged = ensureString(existing.graphId || "") !== ensureString(graph.id || "");
+    let activeNode = resolveStorybookGraphNode(graph, existing.nodeId || graph.entryNodeId || "");
+    if (!activeNode) {
+      this._clearStorybookSceneState(sceneKey);
+      return null;
+    }
+
+    const state = {
+      sceneKey,
+      graphId: ensureString(graph.id || ""),
+      nodeId: ensureString(activeNode.id || ""),
+      activeSinceTs: graphChanged ? now : Number(existing.activeSinceTs || now),
+      lastTransitionAt: Number(existing.lastTransitionAt || 0),
+      lastTransitionReason: ensureString(existing.lastTransitionReason || ""),
+      lastCombatActive: Boolean(existing.lastCombatActive),
+      updatedAtTs: now,
+      source: ensureString(source || existing.source || ""),
+    };
+
+    if (graphChanged || !state.nodeId) {
+      const entryNode = resolveStorybookGraphNode(graph, graph.entryNodeId || activeNode.id || "");
+      if (entryNode) {
+        activeNode = entryNode;
+        state.nodeId = ensureString(entryNode.id || "");
+        state.activeSinceTs = now;
+        state.lastTransitionAt = 0;
+        state.lastTransitionReason = "";
+      }
+    }
+
+    const transitionGuardMs = 1500;
+    const transitionContext = {
+      now,
+      sceneContext,
+      graph,
+      node: activeNode,
+      state,
+      currentCombatActive,
+      previousCombatActive: Boolean(existing.lastCombatActive),
+      activeSinceTs: Number(state.activeSinceTs || now),
+    };
+    let transitionSnapshot = null;
+    if (now - Number(state.lastTransitionAt || 0) >= transitionGuardMs) {
+      for (const transition of ensureArray(activeNode.transitions)) {
+        const result = this._evaluateStorybookTransition(transition, transitionContext);
+        if (!result.pass) continue;
+        const nextNode = resolveStorybookGraphNode(graph, transition.nextNodeId || "");
+        if (!nextNode || normalizeTokenKey(nextNode.id) === normalizeTokenKey(activeNode.id)) {
+          continue;
+        }
+
+        state.nodeId = ensureString(nextNode.id || "");
+        state.activeSinceTs = now;
+        state.lastTransitionAt = now;
+        state.lastTransitionReason = `${ensureString(activeNode.label || activeNode.id || "node")} -> ${ensureString(
+          nextNode.label || nextNode.id || "node"
+        )}: ${result.reason}`;
+        state.lastCombatActive = currentCombatActive;
+        this._storybookSceneStateBySceneKey.set(sceneKey, state);
+
+        transitionSnapshot = {
+          triggered: true,
+          transitionId: ensureString(transition.id || ""),
+          transitionLabel: ensureString(transition.label || transition.id || ""),
+          nextNodeId: ensureString(nextNode.id || ""),
+          reason: result.reason,
+          conditionResults: ensureArray(result.conditionResults),
+          source: ensureString(source || ""),
+        };
+        this.log.info(
+          "storybook",
+          `transition ${ensureString(graph.label || graph.id || "graph")} / ${ensureString(activeNode.label || activeNode.id || "node")} -> ${ensureString(nextNode.label || nextNode.id || "node")} (${result.reason})`
+        );
+        this._trace("storybook.transition", {
+          sceneKey,
+          graphId: graph.id,
+          graphLabel: graph.label,
+          fromNodeId: activeNode.id,
+          fromNodeLabel: activeNode.label,
+          toNodeId: nextNode.id,
+          toNodeLabel: nextNode.label,
+          transitionId: transition.id,
+          transitionLabel: transition.label,
+          reason: result.reason,
+          conditionResults: result.conditionResults,
+          source,
+        });
+        this._storybookTransitionHistory.push({
+          ts: now,
+          sceneKey,
+          graphId: ensureString(graph.id || ""),
+          graphLabel: ensureString(graph.label || ""),
+          fromNodeId: ensureString(activeNode.id || ""),
+          fromNodeLabel: ensureString(activeNode.label || ""),
+          toNodeId: ensureString(nextNode.id || ""),
+          toNodeLabel: ensureString(nextNode.label || ""),
+          transitionId: ensureString(transition.id || ""),
+          transitionLabel: ensureString(transition.label || ""),
+          reason: ensureString(result.reason || ""),
+        });
+        if (this._storybookTransitionHistory.length > 25) {
+          this._storybookTransitionHistory = this._storybookTransitionHistory.slice(-25);
+        }
+        activeNode = nextNode;
+        break;
+      }
+    }
+
+    state.graphId = ensureString(graph.id || "");
+    state.nodeId = ensureString(activeNode.id || state.nodeId || "");
+    state.lastCombatActive = currentCombatActive;
+    this._storybookSceneStateBySceneKey.set(sceneKey, state);
+
+    const snapshot = {
+      enabled: true,
+      mode: storybookConfig.mode,
+      sceneKey,
+      graphId: ensureString(graph.id || ""),
+      graphLabel: ensureString(graph.label || ""),
+      graphNotes: ensureString(graph.notes || ""),
+      sceneId: ensureString(graph.sceneId || ""),
+      sceneName: ensureString(graph.sceneName || ""),
+      activeSinceTs: Number(state.activeSinceTs || now),
+      lastTransitionAt: Number(state.lastTransitionAt || 0),
+      lastTransitionReason: ensureString(state.lastTransitionReason || ""),
+      currentCombatActive,
+      graph: {
+        id: ensureString(graph.id || ""),
+        label: ensureString(graph.label || ""),
+        notes: ensureString(graph.notes || ""),
+        sceneId: ensureString(graph.sceneId || ""),
+        sceneName: ensureString(graph.sceneName || ""),
+        entryNodeId: ensureString(graph.entryNodeId || ""),
+      },
+      activeNode: {
+        id: ensureString(activeNode.id || ""),
+        label: ensureString(activeNode.label || ""),
+        enabled: activeNode.enabled !== false,
+        npcIds: ensureArray(activeNode.npcIds).map((value) => ensureString(value || "").trim()).filter(Boolean),
+        objectiveText: ensureString(activeNode.objectiveText || ""),
+        stageDirections: ensureString(activeNode.stageDirections || ""),
+        transitions: ensureArray(activeNode.transitions).map((nodeTransition) => ({
+          id: ensureString(nodeTransition.id || ""),
+          label: ensureString(nodeTransition.label || ""),
+          nextNodeId: ensureString(nodeTransition.nextNodeId || ""),
+          conditions: ensureArray(nodeTransition.conditions).map((condition) => ({
+            id: ensureString(condition.id || ""),
+            label: ensureString(condition.label || ""),
+            type: normalizeStorybookConditionType(condition.type || ""),
+          })),
+        })),
+      },
+      transition: transitionSnapshot,
+      source: ensureString(source || ""),
+    };
+
+    return snapshot;
+  }
+
+  _applyStorybookToSceneContext(sceneContext, { config = this._configRef, npc = null, runToken = 0, source = "" } = {}) {
+    if (!sceneContext?.ok) return sceneContext;
+    const snapshot = this._resolveStorybookSceneSnapshot({ config, sceneContext, npc, runToken, source });
+    if (snapshot) {
+      sceneContext.storybook = snapshot;
+    }
+    return sceneContext;
+  }
+
   _randomDirectorDelayMs(directorConfig) {
     const min = Math.max(0, Number(directorConfig?.lineDelayMinMs) || 0);
     const max = Math.max(min, Number(directorConfig?.lineDelayMaxMs) || min);
@@ -2876,6 +3449,7 @@ class AppRuntime {
         continue;
       }
       if (!sceneContext?.ok) continue;
+      if (!isNpcAllowedByStorybook(sceneContext, candidate)) continue;
 
       const directorConfig = resolveDirectorConfig({ config, npc: candidate, sceneContext });
       if (!directorConfig.enabled || directorConfig.mode === "off") continue;
@@ -3307,6 +3881,7 @@ class AppRuntime {
         continue;
       }
       if (!sceneContext?.ok) continue;
+      if (!isNpcAllowedByStorybook(sceneContext, npc)) continue;
 
       const ambientConfig = resolveAmbientConfig({ config, sceneContext });
       if (!ambientConfig.enabled) continue;
@@ -3620,6 +4195,8 @@ class AppRuntime {
     this._fvttInboundCutoffTs = 0;
     this._processedCombatTurnKeysByNpc.clear();
     this._lastCombatStateByNpc.clear();
+    this._storybookSceneStateBySceneKey.clear();
+    this._storybookTransitionHistory = [];
     this._stopFvttObservers();
 
     if (this.discord) {
@@ -3647,6 +4224,67 @@ class AppRuntime {
     this._trace("runtime.stopped", { ok: true });
     await this._flushTrace();
     this.log.info("runtime", "stopped.");
+  }
+
+  async getSocialStatus({ config } = {}) {
+    const resolvedConfig =
+      config && typeof config === "object"
+        ? config
+        : this._configRef && typeof this._configRef === "object"
+          ? this._configRef
+          : {};
+    const storybook = normalizeGlobalStorybookConfig(resolvedConfig);
+    const graphsById = new Map(
+      ensureArray(storybook.graphs).map((graph) => [ensureString(graph?.id || ""), graph]).filter(([id]) => Boolean(id))
+    );
+    const sceneStates = Array.from(this._storybookSceneStateBySceneKey.entries())
+      .map(([sceneKey, state]) => {
+        const safeState = isPlainObject(state) ? state : {};
+        const graph = graphsById.get(ensureString(safeState.graphId || "")) || null;
+        const node = resolveStorybookGraphNode(graph, ensureString(safeState.nodeId || ""));
+        return {
+          sceneKey,
+          graphId: ensureString(safeState.graphId || ""),
+          graphLabel: ensureString(graph?.label || safeState.graphLabel || safeState.graphId || ""),
+          nodeId: ensureString(safeState.nodeId || ""),
+          nodeLabel: ensureString(node?.label || safeState.nodeLabel || safeState.nodeId || ""),
+          objectiveText: ensureString(node?.objectiveText || ""),
+          stageDirections: ensureString(node?.stageDirections || ""),
+          activeSinceTs: Number(safeState.activeSinceTs || 0),
+          updatedAtTs: Number(safeState.updatedAtTs || 0),
+          lastTransitionAt: Number(safeState.lastTransitionAt || 0),
+          lastTransitionReason: ensureString(safeState.lastTransitionReason || ""),
+          lastCombatActive: Boolean(safeState.lastCombatActive),
+        };
+      })
+      .sort((a, b) => Number(b.updatedAtTs || 0) - Number(a.updatedAtTs || 0));
+    const recentTransitions = ensureArray(this._storybookTransitionHistory)
+      .slice(-12)
+      .reverse()
+      .map((entry) => ({
+        ts: Number(entry?.ts || 0),
+        sceneKey: ensureString(entry?.sceneKey || ""),
+        graphId: ensureString(entry?.graphId || ""),
+        graphLabel: ensureString(entry?.graphLabel || ""),
+        fromNodeId: ensureString(entry?.fromNodeId || ""),
+        fromNodeLabel: ensureString(entry?.fromNodeLabel || ""),
+        toNodeId: ensureString(entry?.toNodeId || ""),
+        toNodeLabel: ensureString(entry?.toNodeLabel || ""),
+        transitionId: ensureString(entry?.transitionId || ""),
+        transitionLabel: ensureString(entry?.transitionLabel || ""),
+        reason: ensureString(entry?.reason || ""),
+      }));
+    return {
+      ok: true,
+      runtimeStarted: this.started === true,
+      storybook: {
+        enabled: storybook.enabled === true,
+        mode: ensureString(storybook.mode || "simple"),
+        graphCount: ensureArray(storybook.graphs).length,
+      },
+      sceneStates,
+      recentTransitions,
+    };
   }
 
   async getNpcVisuals({ config } = {}) {
@@ -6060,7 +6698,13 @@ class AppRuntime {
     const scene = await this._withNpcActor(npc, () => this.fvtt.getSceneContext(maxTokens), { runToken });
     this._throwIfRuntimeStopped(runToken);
     if (!scene?.ok) return scene;
-    return analyzeSceneTactics(scene, { selfTokenId: String(scene?.actorToken?.id || "").trim() });
+    const analyzed = analyzeSceneTactics(scene, { selfTokenId: String(scene?.actorToken?.id || "").trim() });
+    return this._applyStorybookToSceneContext(analyzed, {
+      config: this._configRef,
+      npc,
+      runToken,
+      source: "scene-context",
+    });
   }
 
   async _deriveMoveFromTarget({ npc, targetTokenRef, runToken = 0 }) {

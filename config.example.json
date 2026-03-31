@@ -90,6 +90,106 @@
       "promptFile": "",
       "promptText": ""
     },
+    "storybook": {
+      "enabled": false,
+      "mode": "simple",
+      "promptFile": "",
+      "promptText": "",
+      "graphs": [
+        {
+          "id": "goblin-guard-shift",
+          "label": "Goblin Guard Shift",
+          "enabled": true,
+          "sceneId": "",
+          "sceneName": "Goblin Cave Entrance",
+          "entryNodeId": "guard-shift",
+          "notes": "A simple scene graph that escalates from idle guard chatter to investigation and alert.",
+          "nodes": [
+            {
+              "id": "guard-shift",
+              "label": "Guard Shift",
+              "enabled": true,
+              "npcIds": ["goblin-a", "goblin-b"],
+              "objectiveText": "The goblins are changing shifts and complaining quietly.",
+              "stageDirections": "Keep it local, unaware, and short. Do not challenge the party yet.",
+              "transitions": [
+                {
+                  "id": "t-player-nearby",
+                  "label": "Player Nearby",
+                  "nextNodeId": "investigate-noise",
+                  "conditions": [
+                    {
+                      "type": "player-nearby",
+                      "distanceFt": 30
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "id": "investigate-noise",
+              "label": "Investigate Noise",
+              "enabled": true,
+              "npcIds": ["goblin-a", "goblin-b"],
+              "objectiveText": "One goblin hushes the other and checks the cave entrance.",
+              "stageDirections": "Reduce casual chatter. Shift toward suspicion and short warning lines.",
+              "transitions": [
+                {
+                  "id": "t-player-visible",
+                  "label": "Player Visible",
+                  "nextNodeId": "guard-alert",
+                  "conditions": [
+                    {
+                      "type": "player-visible",
+                      "distanceFt": 30
+                    }
+                  ]
+                },
+                {
+                  "id": "t-combat-started",
+                  "label": "Combat Started",
+                  "nextNodeId": "combat-alert",
+                  "conditions": [
+                    {
+                      "type": "combat-started"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "id": "guard-alert",
+              "label": "Guard Alert",
+              "enabled": true,
+              "npcIds": ["goblin-a", "goblin-b"],
+              "objectiveText": "The guards have spotted the party and challenge them loudly.",
+              "stageDirections": "Use sharp challenge lines. Keep tension high and prepare for combat.",
+              "transitions": [
+                {
+                  "id": "t-alert-combat",
+                  "label": "Alert to Combat",
+                  "nextNodeId": "combat-alert",
+                  "conditions": [
+                    {
+                      "type": "combat-started"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "id": "combat-alert",
+              "label": "Combat Alert",
+              "enabled": true,
+              "npcIds": ["goblin-a", "goblin-b"],
+              "objectiveText": "The guards are fully hostile and focused on surviving the fight.",
+              "stageDirections": "No idle chatter. Prioritize combat barks and immediate tactical intent.",
+              "transitions": []
+            }
+          ]
+        }
+      ]
+    },
     "worldStateText": "@Diana: watching the room from the window table",
     "scenePresets": [
       {

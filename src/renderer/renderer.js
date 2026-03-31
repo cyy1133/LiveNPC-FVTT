@@ -19,6 +19,11 @@ let npcAvatarLazyObserver = null;
 let npcAvatarLazyObserverRoot = null;
 let runtimeStarted = false;
 let selectedSocialPresetId = "";
+let selectedSocialTabId = "simple";
+let selectedStorybookGraphId = "";
+let selectedStorybookNodeId = "";
+let selectedStorybookTransitionId = "";
+let socialStatusPollTimer = null;
 
 function $(id) {
   return document.getElementById(id);
@@ -192,6 +197,78 @@ function ensureScenePresetShape(preset, index = 0, directorFallback = null, ambi
   return out;
 }
 
+function normalizeStorybookMode(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "node" || raw === "node-storybook" || raw === "storybook" || raw === "graph") return "node-storybook";
+  return "simple";
+}
+
+function ensureStorybookConditionShape(condition) {
+  if (condition && typeof condition === "object" && !Array.isArray(condition)) {
+    return {
+      ...condition,
+      type: String(condition.type || condition.kind || "always").trim() || "always",
+      note: String(condition.note || ""),
+      targetNodeId: String(condition.targetNodeId || condition.nextNodeId || ""),
+    };
+  }
+  const text = String(condition || "").trim();
+  return {
+    type: text || "always",
+    note: "",
+    targetNodeId: "",
+  };
+}
+
+function ensureStorybookTransitionShape(transition, index = 0) {
+  const out = transition && typeof transition === "object" ? transition : {};
+  out.id = String(out.id || out.transitionId || `transition-${index + 1}`);
+  out.label = String(out.label || out.name || out.id || `Transition ${index + 1}`);
+  out.nextNodeId = String(out.nextNodeId || out.targetNodeId || "");
+  const rawConditions = Array.isArray(out.conditions) ? out.conditions : [];
+  out.conditions = rawConditions.map((condition) => ensureStorybookConditionShape(condition)).filter(Boolean);
+  return out;
+}
+
+function ensureStorybookNodeShape(node, index = 0) {
+  const out = node && typeof node === "object" ? node : {};
+  out.id = String(out.id || out.nodeId || `node-${index + 1}`);
+  out.label = String(out.label || out.name || out.id || `Node ${index + 1}`);
+  out.enabled = out.enabled !== false;
+  const npcIds = Array.isArray(out.npcIds) ? out.npcIds : typeof out.npcIds === "string" ? out.npcIds.split(",") : [];
+  out.npcIds = npcIds.map((value) => String(value || "").trim()).filter(Boolean);
+  out.objectiveText = String(out.objectiveText || out.objective || "");
+  out.stageDirections = String(out.stageDirections || out.directions || "");
+  const rawTransitions = Array.isArray(out.transitions) ? out.transitions : [];
+  out.transitions = rawTransitions.map((transition, transitionIndex) => ensureStorybookTransitionShape(transition, transitionIndex));
+  return out;
+}
+
+function ensureStorybookGraphShape(graph, index = 0) {
+  const out = graph && typeof graph === "object" ? graph : {};
+  out.id = String(out.id || out.graphId || `story-graph-${index + 1}`);
+  out.label = String(out.label || out.name || out.sceneName || out.sceneId || out.id || `Graph ${index + 1}`);
+  out.enabled = out.enabled !== false;
+  out.sceneId = String(out.sceneId || out.mapId || "");
+  out.sceneName = String(out.sceneName || out.mapName || "");
+  out.entryNodeId = String(out.entryNodeId || out.startNodeId || "");
+  out.notes = String(out.notes || out.worldStateText || "");
+  const rawNodes = Array.isArray(out.nodes) ? out.nodes : [];
+  out.nodes = rawNodes.map((node, nodeIndex) => ensureStorybookNodeShape(node, nodeIndex));
+  return out;
+}
+
+function ensureStorybookShape(rawStorybook) {
+  const out = rawStorybook && typeof rawStorybook === "object" ? rawStorybook : {};
+  out.enabled = out.enabled === true;
+  out.mode = normalizeStorybookMode(out.mode);
+  out.promptFile = String(out.promptFile || "");
+  out.promptText = String(out.promptText || "");
+  const rawGraphs = Array.isArray(out.graphs) ? out.graphs : [];
+  out.graphs = rawGraphs.map((graph, index) => ensureStorybookGraphShape(graph, index));
+  return out;
+}
+
 function normalizeNpcDirectorOverrideShape(director) {
   const out = director && typeof director === "object" ? director : {};
   out.enabled = normalizeOptionalBool(out.enabled);
@@ -296,6 +373,7 @@ function ensureConfigShape(config) {
   out.npc.scenePresets = out.npc.scenePresets.map((preset, idx) =>
     ensureScenePresetShape(preset, idx, out.npc.director, out.npc.ambient)
   );
+  out.npc.storybook = ensureStorybookShape(out.npc.storybook);
 
   out.imageGeneration =
     out.imageGeneration && typeof out.imageGeneration === "object" ? out.imageGeneration : {};
@@ -571,6 +649,7 @@ function syncNpcGlobalInputsFromConfig(config) {
   }
 
   syncSocialPresetSelectFromConfig(config);
+  syncStorybookFieldsFromConfig(config);
 }
 
 function applyNpcGlobalFormToConfig(config) {
@@ -609,7 +688,7 @@ function applyNpcGlobalFormToConfig(config) {
   next.npc.ambient.promptText = String($("f-ambient-prompt-text")?.value || "").trim();
   next.npc.worldStateText = String($("f-world-state-text")?.value || "").trim();
 
-  return next;
+  return applyStorybookFormToConfig(next);
 }
 
 function makeUniqueScenePresetId(config, base = "scene-preset") {
@@ -719,6 +798,841 @@ function applyScenePresetToConfig(config, preset) {
     return current;
   });
   return next;
+}
+
+function makeUniqueStorybookId(takenIds, base) {
+  const taken = takenIds instanceof Set ? takenIds : new Set(ensureArray(takenIds).map((value) => String(value || "").trim()).filter(Boolean));
+  const prefix = String(base || "item").trim() || "item";
+  let i = 1;
+  while (taken.has(`${prefix}-${i}`.toLowerCase())) {
+    i += 1;
+  }
+  return `${prefix}-${i}`;
+}
+
+function getSelectedStorybookGraph(config = currentConfig) {
+  const book = config?.npc?.storybook;
+  const graphs = Array.isArray(book?.graphs) ? book.graphs : [];
+  if (!graphs.length) return null;
+  const requested = String(selectedStorybookGraphId || "").trim();
+  if (requested) {
+    const match = graphs.find((graph) => String(graph?.id || "") === requested);
+    if (match) return match;
+  }
+  return graphs[0] || null;
+}
+
+function getSelectedStorybookNode(config = currentConfig) {
+  const graph = getSelectedStorybookGraph(config);
+  if (!graph) return null;
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+  if (!nodes.length) return null;
+  const requested = String(selectedStorybookNodeId || "").trim();
+  if (requested) {
+    const match = nodes.find((node) => String(node?.id || "") === requested);
+    if (match) return match;
+  }
+  return nodes[0] || null;
+}
+
+function getSelectedStorybookTransition(config = currentConfig) {
+  const node = getSelectedStorybookNode(config);
+  if (!node) return null;
+  const transitions = Array.isArray(node.transitions) ? node.transitions : [];
+  if (!transitions.length) return null;
+  const requested = String(selectedStorybookTransitionId || "").trim();
+  if (requested) {
+    const match = transitions.find((transition) => String(transition?.id || "") === requested);
+    if (match) return match;
+  }
+  return transitions[0] || null;
+}
+
+function syncStorybookGraphSelectFromConfig(config) {
+  const select = $("f-storybook-graph-select");
+  if (!select) return;
+  const book = config?.npc?.storybook || {};
+  const graphs = Array.isArray(book.graphs) ? book.graphs : [];
+  if (!selectedStorybookGraphId && graphs[0]?.id) {
+    selectedStorybookGraphId = String(graphs[0].id || "");
+  }
+  if (selectedStorybookGraphId && !graphs.some((graph) => String(graph?.id || "") === selectedStorybookGraphId)) {
+    selectedStorybookGraphId = String(graphs[0]?.id || "");
+  }
+  select.innerHTML = "";
+  if (!graphs.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "(No graphs)";
+    select.appendChild(option);
+  } else {
+    for (const graph of graphs) {
+      const option = document.createElement("option");
+      option.value = String(graph?.id || "");
+      option.textContent = String(graph?.label || graph?.sceneName || graph?.sceneId || graph?.id || "(unnamed)");
+      select.appendChild(option);
+    }
+  }
+  select.value = String(selectedStorybookGraphId || "");
+}
+
+function syncStorybookNodeSelectFromConfig(config) {
+  const select = $("f-storybook-node-select");
+  if (!select) return;
+  const graph = getSelectedStorybookGraph(config);
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
+  if (!selectedStorybookNodeId && nodes[0]?.id) {
+    selectedStorybookNodeId = String(nodes[0].id || "");
+  }
+  if (selectedStorybookNodeId && !nodes.some((node) => String(node?.id || "") === selectedStorybookNodeId)) {
+    selectedStorybookNodeId = String(nodes[0]?.id || "");
+  }
+  select.innerHTML = "";
+  if (!nodes.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "(No nodes)";
+    select.appendChild(option);
+  } else {
+    for (const node of nodes) {
+      const option = document.createElement("option");
+      option.value = String(node?.id || "");
+      option.textContent = String(node?.label || node?.id || "(unnamed)");
+      select.appendChild(option);
+    }
+  }
+  select.value = String(selectedStorybookNodeId || "");
+}
+
+function syncStorybookTransitionSelectFromConfig(config) {
+  const select = $("f-storybook-transition-select");
+  if (!select) return;
+  const node = getSelectedStorybookNode(config);
+  const transitions = Array.isArray(node?.transitions) ? node.transitions : [];
+  if (!selectedStorybookTransitionId && transitions[0]?.id) {
+    selectedStorybookTransitionId = String(transitions[0].id || "");
+  }
+  if (selectedStorybookTransitionId && !transitions.some((transition) => String(transition?.id || "") === selectedStorybookTransitionId)) {
+    selectedStorybookTransitionId = String(transitions[0]?.id || "");
+  }
+  select.innerHTML = "";
+  if (!transitions.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "(No transitions)";
+    select.appendChild(option);
+  } else {
+    for (const transition of transitions) {
+      const option = document.createElement("option");
+      option.value = String(transition?.id || "");
+      option.textContent = String(transition?.label || transition?.id || "(unnamed)");
+      select.appendChild(option);
+    }
+  }
+  select.value = String(selectedStorybookTransitionId || "");
+}
+
+function renderStorybookPreview(config) {
+  const preview = $("storybook-preview-summary");
+  if (!preview) return;
+  renderStorybookGraphVisual(config);
+  const book = config?.npc?.storybook || {};
+  const graphs = Array.isArray(book.graphs) ? book.graphs : [];
+  const graph = getSelectedStorybookGraph(config);
+  const node = getSelectedStorybookNode(config);
+  const transition = getSelectedStorybookTransition(config);
+  const lines = [
+    `Storybook: ${book.enabled ? "enabled" : "disabled"} / ${String(book.mode || "simple")}`,
+    `Graphs: ${graphs.length}`,
+  ];
+  if (graph) {
+    const nodeCount = Array.isArray(graph.nodes) ? graph.nodes.length : 0;
+    lines.push(`Selected graph: ${graph.label || graph.id}`);
+    lines.push(`Scene match: ${graph.sceneId || "-"} / ${graph.sceneName || "-"}`);
+    lines.push(`Entry node: ${graph.entryNodeId || "-"}`);
+    lines.push(`Nodes in graph: ${nodeCount}`);
+    if (node) {
+      lines.push(`Selected node: ${node.label || node.id}`);
+      lines.push(`NPCs: ${Array.isArray(node.npcIds) && node.npcIds.length ? node.npcIds.join(", ") : "-"}`);
+      lines.push(`Transitions: ${Array.isArray(node.transitions) ? node.transitions.length : 0}`);
+      lines.push(`Objective: ${String(node.objectiveText || "").trim() || "-"}`);
+      if (transition) {
+        const conditionList = Array.isArray(transition.conditions)
+          ? transition.conditions
+              .map((condition) => {
+                const shape = ensureStorybookConditionShape(condition);
+                const type = String(shape?.type || shape?.kind || "").trim();
+                if (!type) return "";
+                const distance =
+                  shape?.distanceFt ?? shape?.rangeFt ?? shape?.radiusFt ?? shape?.ft ?? null;
+                const timeout =
+                  shape?.seconds ??
+                  (Number.isFinite(Number(shape?.minutes)) ? `${Number(shape.minutes)}m` : null) ??
+                  (Number.isFinite(Number(shape?.timeoutMs || shape?.durationMs || shape?.ms))
+                    ? `${Math.round(Number(shape.timeoutMs || shape.durationMs || shape.ms) / 1000)}s`
+                    : null);
+                if (distance !== null && distance !== undefined && distance !== "") return `${type}(${distance}ft)`;
+                if (timeout !== null && timeout !== undefined && timeout !== "") return `${type}(${timeout})`;
+                return type;
+              })
+              .filter(Boolean)
+          : [];
+        lines.push(`Selected transition: ${transition.label || transition.id}`);
+        lines.push(`Next node: ${transition.nextNodeId || "-"}`);
+        lines.push(`Conditions: ${conditionList.length ? conditionList.join(", ") : "-"}`);
+      }
+    }
+  } else {
+    lines.push("No storybook graph selected.");
+  }
+  preview.textContent = lines.join("\n");
+}
+
+function formatUiRelativeTime(ts) {
+  const value = Number(ts || 0);
+  if (!Number.isFinite(value) || value <= 0) return "-";
+  const deltaMs = Math.max(0, Date.now() - value);
+  if (deltaMs < 1000) return "just now";
+  const sec = Math.round(deltaMs / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hour = Math.round(min / 60);
+  if (hour < 24) return `${hour}h ago`;
+  const day = Math.round(hour / 24);
+  return `${day}d ago`;
+}
+
+function renderSocialStatus(payload) {
+  const summaryRoot = $("social-status-summary");
+  const scenesRoot = $("social-status-scenes");
+  const transitionsRoot = $("social-status-transitions");
+  if (!summaryRoot || !scenesRoot || !transitionsRoot) return;
+
+  const status = payload && typeof payload === "object" ? payload : {};
+  const storybook = status.storybook && typeof status.storybook === "object" ? status.storybook : {};
+  const sceneStates = Array.isArray(status.sceneStates) ? status.sceneStates : [];
+  const transitions = Array.isArray(status.recentTransitions) ? status.recentTransitions : [];
+
+  const summaryItems = [
+    `Runtime: ${status.runtimeStarted ? "running" : "stopped"}`,
+    `Storybook: ${storybook.enabled ? "enabled" : "disabled"}`,
+    `Mode: ${String(storybook.mode || "simple")}`,
+    `Graphs: ${Number(storybook.graphCount || 0)}`,
+    `Active scenes: ${sceneStates.length}`,
+  ];
+  summaryRoot.innerHTML = summaryItems
+    .map((line) => {
+      const colonIndex = line.indexOf(":");
+      const label = colonIndex >= 0 ? line.slice(0, colonIndex) : line;
+      const value = colonIndex >= 0 ? line.slice(colonIndex + 1).trim() : "";
+      return `<div class="social-status-item"><strong>${label}</strong><div class="meta">${value}</div></div>`;
+    })
+    .join("");
+
+  if (!sceneStates.length) {
+    scenesRoot.innerHTML = '<div class="social-status-item"><strong>No active Storybook scene</strong><div class="meta">Start the runtime and enter a matched scene to see active nodes here.</div></div>';
+  } else {
+    scenesRoot.innerHTML = sceneStates
+      .map((entry) => {
+        const objective = String(entry?.objectiveText || "").trim();
+        const stageDirections = String(entry?.stageDirections || "").trim();
+        const meta = [
+          `Scene key: ${String(entry?.sceneKey || "-")}`,
+          `Updated: ${formatUiRelativeTime(entry?.updatedAtTs)}`,
+          String(entry?.lastTransitionReason || "").trim() ? `Last transition: ${String(entry.lastTransitionReason).trim()}` : "",
+        ]
+          .filter(Boolean)
+          .join("<br>");
+        return `<div class="social-status-item"><strong>${String(entry?.graphLabel || entry?.graphId || "Storybook")} / ${String(entry?.nodeLabel || entry?.nodeId || "node")}</strong><div class="meta">${meta}</div>${objective ? `<div style="margin-top:8px">${objective}</div>` : ""}${stageDirections ? `<div class="meta" style="margin-top:6px">${stageDirections}</div>` : ""}</div>`;
+      })
+      .join("");
+  }
+
+  if (!transitions.length) {
+    transitionsRoot.innerHTML = '<div class="social-status-item"><strong>No recent transitions</strong><div class="meta">When Storybook state changes, the latest transitions will appear here.</div></div>';
+  } else {
+    transitionsRoot.innerHTML = transitions
+      .map((entry) => {
+        const title = `${String(entry?.graphLabel || entry?.graphId || "Storybook")} :: ${String(entry?.fromNodeLabel || entry?.fromNodeId || "-")} -> ${String(entry?.toNodeLabel || entry?.toNodeId || "-")}`;
+        const meta = [`When: ${formatUiRelativeTime(entry?.ts)}`, `Reason: ${String(entry?.reason || "-")}`].join("<br>");
+        return `<div class="social-status-item"><strong>${title}</strong><div class="meta">${meta}</div></div>`;
+      })
+      .join("");
+  }
+}
+
+async function refreshSocialStatus({ silent = true } = {}) {
+  try {
+    const result = await window.api.getSocialStatus(currentConfig || {});
+    renderSocialStatus(result);
+  } catch (e) {
+    if (!silent) {
+      appendLog({ ts: Date.now(), level: "error", scope: "ui", message: `social status failed: ${e?.message || e}` });
+    }
+  }
+}
+
+function buildStorybookNodeOptions(graph, { includeEmptyLabel = "(No nodes)" } = {}) {
+  const options = [];
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
+  if (!nodes.length) {
+    options.push({ value: "", label: includeEmptyLabel });
+    return options;
+  }
+  for (const node of nodes) {
+    options.push({
+      value: String(node?.id || ""),
+      label: String(node?.label || node?.id || "(unnamed)"),
+    });
+  }
+  return options;
+}
+
+function syncStorybookNodeTargetSelect(selectId, graph, value, emptyLabel) {
+  const select = $(selectId);
+  if (!select) return;
+  const options = buildStorybookNodeOptions(graph, { includeEmptyLabel: emptyLabel });
+  select.innerHTML = "";
+  for (const optionSpec of options) {
+    const option = document.createElement("option");
+    option.value = String(optionSpec.value || "");
+    option.textContent = String(optionSpec.label || optionSpec.value || "");
+    select.appendChild(option);
+  }
+  const wanted = String(value || "").trim();
+  if (wanted && options.some((option) => String(option.value || "") === wanted)) {
+    select.value = wanted;
+    return;
+  }
+  select.value = String(options[0]?.value || "");
+}
+
+function getPrimaryStorybookCondition(transition) {
+  const conditions = Array.isArray(transition?.conditions) ? transition.conditions : [];
+  if (!conditions.length) return ensureStorybookConditionShape({ type: "always" });
+  return ensureStorybookConditionShape(conditions[0]);
+}
+
+function shouldUseAdvancedStorybookConditions(transition) {
+  const conditions = Array.isArray(transition?.conditions) ? transition.conditions : [];
+  if (conditions.length > 1) return true;
+  if (!conditions.length) return false;
+  const first = ensureStorybookConditionShape(conditions[0]);
+  return Boolean(first.targetNodeId);
+}
+
+function syncStorybookModeUi(config) {
+  const section = $("storybook-section");
+  if (!section) return;
+  const mode = normalizeStorybookMode(config?.npc?.storybook?.mode || "simple");
+  const advancedEnabled = $("f-storybook-transition-advanced-enabled")?.checked === true;
+  section.dataset.storybookMode = mode === "node-storybook" ? "node" : "simple";
+  section.dataset.storybookAdvanced = advancedEnabled ? "on" : "off";
+  const note = $("storybook-mode-note");
+  if (!note) return;
+  if (mode === "node-storybook") {
+    note.innerHTML =
+      "<strong>Node Storybook</strong><span class=\"muted\">Use scene graphs, story nodes, and transition rules when you want staged escalation, patrol loops, guard shifts, or branching beats.</span>";
+    return;
+  }
+  note.innerHTML =
+    "<strong>Simple Director</strong><span class=\"muted\">Keep the current social director workflow. Nearby reactions, NPC-to-NPC talk, and ambient chatter work without graph setup.</span>";
+}
+
+function syncStorybookFieldsFromConfig(config) {
+  const book = config?.npc?.storybook || {};
+  const enabled = $("f-storybook-enabled");
+  if (enabled) enabled.checked = book.enabled === true;
+  const mode = $("f-storybook-mode");
+  if (mode) mode.value = normalizeStorybookMode(book.mode);
+  const promptFile = $("f-storybook-prompt-file");
+  if (promptFile) promptFile.value = String(book.promptFile || "");
+  const promptText = $("f-storybook-prompt-text");
+  if (promptText) promptText.value = String(book.promptText || "");
+
+  syncStorybookGraphSelectFromConfig(config);
+  syncStorybookNodeSelectFromConfig(config);
+  syncStorybookTransitionSelectFromConfig(config);
+
+  const graph = getSelectedStorybookGraph(config);
+  const node = getSelectedStorybookNode(config);
+  const transition = getSelectedStorybookTransition(config);
+  if ($("f-storybook-graph-label")) $("f-storybook-graph-label").value = String(graph?.label || "");
+  if ($("f-storybook-graph-enabled")) $("f-storybook-graph-enabled").checked = graph?.enabled !== false;
+  if ($("f-storybook-graph-scene-id")) $("f-storybook-graph-scene-id").value = String(graph?.sceneId || "");
+  if ($("f-storybook-graph-scene-name")) $("f-storybook-graph-scene-name").value = String(graph?.sceneName || "");
+  syncStorybookNodeTargetSelect("f-storybook-graph-entry-node-id", graph, graph?.entryNodeId || "", "(Select entry node)");
+  if ($("f-storybook-graph-notes")) $("f-storybook-graph-notes").value = String(graph?.notes || "");
+
+  if ($("f-storybook-node-id")) $("f-storybook-node-id").value = String(node?.id || "");
+  if ($("f-storybook-node-label")) $("f-storybook-node-label").value = String(node?.label || "");
+  if ($("f-storybook-node-enabled")) $("f-storybook-node-enabled").checked = node?.enabled !== false;
+  if ($("f-storybook-node-npc-ids")) $("f-storybook-node-npc-ids").value = Array.isArray(node?.npcIds) ? node.npcIds.join("\n") : "";
+  if ($("f-storybook-node-objective-text")) $("f-storybook-node-objective-text").value = String(node?.objectiveText || "");
+  if ($("f-storybook-node-stage-directions")) $("f-storybook-node-stage-directions").value = String(node?.stageDirections || "");
+
+  if ($("f-storybook-transition-label")) $("f-storybook-transition-label").value = String(transition?.label || "");
+  syncStorybookNodeTargetSelect("f-storybook-transition-next-node-id", graph, transition?.nextNodeId || "", "(Select next node)");
+  const primaryCondition = getPrimaryStorybookCondition(transition);
+  const quickType = $("f-storybook-transition-condition-type");
+  if (quickType) quickType.value = String(primaryCondition?.type || "always");
+  const quickDistance = $("f-storybook-transition-condition-distance-ft");
+  if (quickDistance) {
+    const distance =
+      primaryCondition?.distanceFt ?? primaryCondition?.rangeFt ?? primaryCondition?.radiusFt ?? primaryCondition?.ft ?? "";
+    quickDistance.value = distance === "" ? "" : String(distance);
+  }
+  const quickTimeout = $("f-storybook-transition-condition-timeout-seconds");
+  if (quickTimeout) {
+    const seconds =
+      primaryCondition?.seconds ??
+      (Number.isFinite(Number(primaryCondition?.minutes)) ? Number(primaryCondition.minutes) * 60 : null) ??
+      (Number.isFinite(Number(primaryCondition?.timeoutMs || primaryCondition?.durationMs || primaryCondition?.ms))
+        ? Math.round(Number(primaryCondition.timeoutMs || primaryCondition.durationMs || primaryCondition.ms) / 1000)
+        : "");
+    quickTimeout.value = seconds === "" || seconds === null ? "" : String(seconds);
+  }
+  const advancedEnabled = $("f-storybook-transition-advanced-enabled");
+  if (advancedEnabled) advancedEnabled.checked = shouldUseAdvancedStorybookConditions(transition);
+  if ($("f-storybook-transition-conditions")) {
+    $("f-storybook-transition-conditions").value = JSON.stringify(Array.isArray(transition?.conditions) ? transition.conditions : [], null, 2);
+  }
+
+  syncStorybookModeUi(config);
+  renderStorybookPreview(config);
+}
+
+function applyStorybookFormToConfig(config) {
+  const next = ensureConfigShape(config || {});
+  next.npc.storybook = next.npc.storybook || {};
+  next.npc.storybook.enabled = $("f-storybook-enabled")?.checked === true;
+  next.npc.storybook.mode = normalizeStorybookMode($("f-storybook-mode")?.value || "simple");
+  next.npc.storybook.promptFile = String($("f-storybook-prompt-file")?.value || "").trim();
+  next.npc.storybook.promptText = String($("f-storybook-prompt-text")?.value || "").trim();
+
+  const book = next.npc.storybook;
+  const graph = getSelectedStorybookGraph(next);
+  const node = getSelectedStorybookNode(next);
+  const transition = getSelectedStorybookTransition(next);
+  if (graph) {
+    graph.label = String($("f-storybook-graph-label")?.value || graph.label || "").trim() || graph.label || graph.id;
+    graph.enabled = $("f-storybook-graph-enabled")?.checked !== false;
+    graph.sceneId = String($("f-storybook-graph-scene-id")?.value || "").trim();
+    graph.sceneName = String($("f-storybook-graph-scene-name")?.value || "").trim();
+    graph.entryNodeId = String($("f-storybook-graph-entry-node-id")?.value || "").trim();
+    graph.notes = String($("f-storybook-graph-notes")?.value || "").trim();
+  }
+  if (node) {
+    const nextNodeId = String($("f-storybook-node-id")?.value || "").trim();
+    if (nextNodeId) {
+      const previousNodeId = String(node.id || "");
+      node.id = nextNodeId;
+      if (selectedStorybookNodeId === previousNodeId) {
+        selectedStorybookNodeId = nextNodeId;
+      }
+      if (graph?.entryNodeId === previousNodeId) {
+        graph.entryNodeId = nextNodeId;
+      }
+      for (const candidate of ensureArray(graph?.nodes)) {
+        for (const transitionItem of ensureArray(candidate?.transitions)) {
+          if (String(transitionItem?.nextNodeId || "") === previousNodeId) {
+            transitionItem.nextNodeId = nextNodeId;
+          }
+        }
+      }
+    }
+    node.label = String($("f-storybook-node-label")?.value || node.label || "").trim() || node.label || node.id;
+    node.enabled = $("f-storybook-node-enabled")?.checked !== false;
+    node.npcIds = String($("f-storybook-node-npc-ids")?.value || "")
+      .split(/[\r\n,]+/)
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    node.objectiveText = String($("f-storybook-node-objective-text")?.value || "").trim();
+    node.stageDirections = String($("f-storybook-node-stage-directions")?.value || "").trim();
+  }
+  if (transition) {
+    transition.label = String($("f-storybook-transition-label")?.value || transition.label || "").trim() || transition.label || transition.id;
+    transition.nextNodeId = String($("f-storybook-transition-next-node-id")?.value || "").trim();
+    const useAdvanced = $("f-storybook-transition-advanced-enabled")?.checked === true;
+    const raw = String($("f-storybook-transition-conditions")?.value || "").trim();
+    if (useAdvanced && raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        transition.conditions = Array.isArray(parsed) ? parsed.map((item) => ensureStorybookConditionShape(item)) : [];
+      } catch {
+        transition.conditions = Array.isArray(transition.conditions) ? transition.conditions : [];
+      }
+    } else if (useAdvanced) {
+      transition.conditions = [];
+    } else {
+      const quickType = String($("f-storybook-transition-condition-type")?.value || "always").trim() || "always";
+      const quick = { type: quickType };
+      const distanceFt = Number($("f-storybook-transition-condition-distance-ft")?.value);
+      const timeoutSeconds = Number($("f-storybook-transition-condition-timeout-seconds")?.value);
+      if ((quickType === "player-nearby" || quickType === "player-visible") && Number.isFinite(distanceFt) && distanceFt > 0) {
+        quick.distanceFt = Math.round(distanceFt);
+      }
+      if (quickType === "active-node-timeout" && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0) {
+        quick.seconds = Math.round(timeoutSeconds);
+      }
+      transition.conditions = [ensureStorybookConditionShape(quick)];
+    }
+  }
+
+  book.graphs = ensureArray(book.graphs).map((item, index) => ensureStorybookGraphShape(item, index));
+  next.npc.storybook = ensureStorybookShape(book);
+  syncStorybookModeUi(next);
+  renderStorybookPreview(next);
+  return next;
+}
+
+function selectStorybookGraph(config, graphId) {
+  const nextGraphId = String(graphId || "").trim();
+  selectedStorybookGraphId = nextGraphId;
+  selectedStorybookNodeId = "";
+  selectedStorybookTransitionId = "";
+  syncStorybookFieldsFromConfig(config);
+}
+
+function selectStorybookNode(config, nodeId) {
+  selectedStorybookNodeId = String(nodeId || "").trim();
+  selectedStorybookTransitionId = "";
+  syncStorybookFieldsFromConfig(config);
+}
+
+function selectStorybookTransition(config, transitionId) {
+  selectedStorybookTransitionId = String(transitionId || "").trim();
+  syncStorybookFieldsFromConfig(config);
+}
+
+function makeUniqueStorybookGraphId(config, base = "story-graph") {
+  const taken = new Set(
+    ensureArray(config?.npc?.storybook?.graphs)
+      .map((graph) => String(graph?.id || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  return makeUniqueStorybookId(taken, base);
+}
+
+function makeUniqueStorybookNodeId(graph, base = "node") {
+  const taken = new Set(
+    ensureArray(graph?.nodes)
+      .map((node) => String(node?.id || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  return makeUniqueStorybookId(taken, base);
+}
+
+function makeUniqueStorybookTransitionId(node, base = "transition") {
+  const taken = new Set(
+    ensureArray(node?.transitions)
+      .map((transition) => String(transition?.id || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  return makeUniqueStorybookId(taken, base);
+}
+
+function createStorybookTemplateGraph(config, templateId) {
+  const graphIdBase =
+    templateId === "guard-shift" ? "guard-shift" : templateId === "patrol-alert" ? "patrol-alert" : "tavern-rumor";
+  const graphId = makeUniqueStorybookGraphId(config, graphIdBase);
+  const makeNodeId = (suffix) => `${graphId}-${suffix}`;
+  if (templateId === "guard-shift") {
+    return ensureStorybookGraphShape({
+      id: graphId,
+      label: "Guard Shift",
+      sceneName: "",
+      notes: "Low-prep guard rotation. Assign node NPC ids after creation.",
+      entryNodeId: makeNodeId("rotation"),
+      nodes: [
+        {
+          id: makeNodeId("rotation"),
+          label: "Rotation",
+          objectiveText: "Guards complain, hand over watch, and keep a low level of routine chatter.",
+          stageDirections: "Calm but alert. Short lines. Feels like a normal shift change.",
+          transitions: [
+            {
+              id: `${graphId}-rotation-nearby`,
+              label: "Player Nearby",
+              nextNodeId: makeNodeId("suspicious"),
+              conditions: [{ type: "player-nearby", distanceFt: 25 }],
+            },
+            {
+              id: `${graphId}-rotation-combat`,
+              label: "Combat Started",
+              nextNodeId: makeNodeId("combat"),
+              conditions: [{ type: "combat-started" }],
+            },
+          ],
+        },
+        {
+          id: makeNodeId("suspicious"),
+          label: "Suspicious",
+          objectiveText: "The guards trade short lines about a sound, movement, or something feeling wrong.",
+          stageDirections: "Tension rises. Less joking, more scanning and short questions.",
+          transitions: [
+            {
+              id: `${graphId}-suspicious-visible`,
+              label: "Player Visible",
+              nextNodeId: makeNodeId("challenge"),
+              conditions: [{ type: "player-visible", distanceFt: 25 }],
+            },
+            {
+              id: `${graphId}-suspicious-timeout`,
+              label: "Calm Returns",
+              nextNodeId: makeNodeId("rotation"),
+              conditions: [{ type: "active-node-timeout", seconds: 15 }],
+            },
+            {
+              id: `${graphId}-suspicious-combat`,
+              label: "Combat Started",
+              nextNodeId: makeNodeId("combat"),
+              conditions: [{ type: "combat-started" }],
+            },
+          ],
+        },
+        {
+          id: makeNodeId("challenge"),
+          label: "Challenge",
+          objectiveText: "Guards address the intruders directly and demand an answer or halt.",
+          stageDirections: "Direct, loud, and defensive. Keep it focused on warning or challenge.",
+          transitions: [
+            {
+              id: `${graphId}-challenge-combat`,
+              label: "Combat Started",
+              nextNodeId: makeNodeId("combat"),
+              conditions: [{ type: "combat-started" }],
+            },
+            {
+              id: `${graphId}-challenge-timeout`,
+              label: "Nobody Escalates",
+              nextNodeId: makeNodeId("rotation"),
+              conditions: [{ type: "active-node-timeout", seconds: 12 }],
+            },
+          ],
+        },
+        {
+          id: makeNodeId("combat"),
+          label: "Combat",
+          objectiveText: "Social beats stop. This node exists only to explain why the guards are no longer chatting.",
+          stageDirections: "Hold until combat ends.",
+          transitions: [
+            {
+              id: `${graphId}-combat-ended`,
+              label: "Combat Ended",
+              nextNodeId: makeNodeId("rotation"),
+              conditions: [{ type: "combat-ended" }],
+            },
+          ],
+        },
+      ],
+    });
+  }
+
+  if (templateId === "patrol-alert") {
+    return ensureStorybookGraphShape({
+      id: graphId,
+      label: "Patrol Alert",
+      sceneName: "",
+      notes: "Good for corridors, caves, and camp patrols.",
+      entryNodeId: makeNodeId("patrol"),
+      nodes: [
+        {
+          id: makeNodeId("patrol"),
+          label: "Patrol",
+          objectiveText: "The patrol exchanges short status lines while moving through the area.",
+          stageDirections: "Routine movement and brief check-ins.",
+          transitions: [
+            {
+              id: `${graphId}-patrol-nearby`,
+              label: "Player Nearby",
+              nextNodeId: makeNodeId("inspect"),
+              conditions: [{ type: "player-nearby", distanceFt: 30 }],
+            },
+          ],
+        },
+        {
+          id: makeNodeId("inspect"),
+          label: "Inspect",
+          objectiveText: "The patrol narrows focus and checks the suspicious area.",
+          stageDirections: "Short investigative lines, cautious tone.",
+          transitions: [
+            {
+              id: `${graphId}-inspect-visible`,
+              label: "Player Visible",
+              nextNodeId: makeNodeId("alarm"),
+              conditions: [{ type: "player-visible", distanceFt: 30 }],
+            },
+            {
+              id: `${graphId}-inspect-timeout`,
+              label: "Nothing Found",
+              nextNodeId: makeNodeId("patrol"),
+              conditions: [{ type: "active-node-timeout", seconds: 20 }],
+            },
+          ],
+        },
+        {
+          id: makeNodeId("alarm"),
+          label: "Alarm",
+          objectiveText: "The patrol warns others, calls out targets, and prepares escalation.",
+          stageDirections: "Fast, loud, urgent.",
+          transitions: [
+            {
+              id: `${graphId}-alarm-combat`,
+              label: "Combat Started",
+              nextNodeId: makeNodeId("combat"),
+              conditions: [{ type: "combat-started" }],
+            },
+          ],
+        },
+        {
+          id: makeNodeId("combat"),
+          label: "Combat",
+          objectiveText: "Combat has taken over the scene.",
+          stageDirections: "Let the combat system drive from here.",
+          transitions: [
+            {
+              id: `${graphId}-combat-ended`,
+              label: "Combat Ended",
+              nextNodeId: makeNodeId("patrol"),
+              conditions: [{ type: "combat-ended" }],
+            },
+          ],
+        },
+      ],
+    });
+  }
+
+  return ensureStorybookGraphShape({
+    id: graphId,
+    label: "Tavern Rumor",
+    sceneName: "",
+    notes: "A simple social graph for bards, barkeeps, and regulars.",
+    entryNodeId: makeNodeId("idle"),
+    nodes: [
+      {
+        id: makeNodeId("idle"),
+        label: "Idle Chatter",
+        objectiveText: "Locals trade light rumors and background chatter without focusing on the party too hard.",
+        stageDirections: "Loose, warm, low-stakes.",
+        transitions: [
+          {
+            id: `${graphId}-idle-nearby`,
+            label: "Player Nearby",
+            nextNodeId: makeNodeId("hook"),
+            conditions: [{ type: "player-nearby", distanceFt: 20 }],
+          },
+        ],
+      },
+      {
+        id: makeNodeId("hook"),
+        label: "Rumor Hook",
+        objectiveText: "One or two NPCs start hinting at a specific rumor or problem in the room.",
+        stageDirections: "Still social, but more directed. Avoid turning everyone into quest givers.",
+        transitions: [
+          {
+            id: `${graphId}-hook-timeout`,
+            label: "Back To Idle",
+            nextNodeId: makeNodeId("idle"),
+            conditions: [{ type: "active-node-timeout", seconds: 25 }],
+          },
+        ],
+      },
+    ],
+  });
+}
+
+function formatStorybookConditionSummary(condition) {
+  const normalized = ensureStorybookConditionShape(condition);
+  const type = String(normalized.type || "always").trim();
+  if (type === "player-nearby") {
+    const distance = normalized.distanceFt ?? normalized.rangeFt ?? normalized.radiusFt ?? normalized.ft ?? 30;
+    return `Player nearby <= ${distance}ft`;
+  }
+  if (type === "player-visible") {
+    const distance = normalized.distanceFt ?? normalized.rangeFt ?? normalized.radiusFt ?? normalized.ft;
+    return distance ? `Player visible within ${distance}ft` : "Player visible";
+  }
+  if (type === "active-node-timeout") {
+    const seconds =
+      normalized.seconds ??
+      (Number.isFinite(Number(normalized.minutes)) ? Number(normalized.minutes) * 60 : null) ??
+      (Number.isFinite(Number(normalized.timeoutMs || normalized.durationMs || normalized.ms))
+        ? Math.round(Number(normalized.timeoutMs || normalized.durationMs || normalized.ms) / 1000)
+        : null);
+    return seconds ? `Node timeout ${seconds}s` : "Node timeout";
+  }
+  if (type === "combat-started") return "Combat started";
+  if (type === "combat-ended") return "Combat ended";
+  if (type === "always") return "Always";
+  return type;
+}
+
+function renderStorybookGraphVisual(config) {
+  const root = $("storybook-graph-visual");
+  if (!root) return;
+  root.innerHTML = "";
+  const graph = getSelectedStorybookGraph(config);
+  if (!graph) {
+    const empty = document.createElement("div");
+    empty.className = "storybook-graph-node";
+    empty.textContent = "No story graph selected.";
+    root.appendChild(empty);
+    return;
+  }
+
+  const selectedNodeId = String(getSelectedStorybookNode(config)?.id || "");
+  const entryNodeId = String(graph?.entryNodeId || "");
+  const nodes = ensureArray(graph?.nodes);
+  for (const node of nodes) {
+    const card = document.createElement("article");
+    card.className = "storybook-graph-node";
+    if (String(node?.id || "") === selectedNodeId) card.classList.add("active");
+    if (String(node?.id || "") === entryNodeId) card.classList.add("entry");
+
+    const header = document.createElement("div");
+    header.className = "storybook-graph-node-header";
+
+    const title = document.createElement("div");
+    title.className = "storybook-graph-node-title";
+    title.textContent = String(node?.label || node?.id || "(node)");
+    header.appendChild(title);
+
+    const badge = document.createElement("div");
+    badge.className = "storybook-graph-node-badge";
+    badge.textContent = String(node?.id || "");
+    header.appendChild(badge);
+    card.appendChild(header);
+
+    const meta = document.createElement("div");
+    meta.className = "storybook-graph-node-meta";
+    const objective = document.createElement("div");
+    objective.textContent = `Objective: ${String(node?.objectiveText || "").trim() || "-"}`;
+    meta.appendChild(objective);
+    const actors = document.createElement("div");
+    actors.textContent = `Actors: ${ensureArray(node?.npcIds).length ? ensureArray(node.npcIds).join(", ") : "all matched NPCs"}`;
+    meta.appendChild(actors);
+    card.appendChild(meta);
+
+    const links = document.createElement("div");
+    links.className = "storybook-graph-node-links";
+    const transitions = ensureArray(node?.transitions);
+    if (!transitions.length) {
+      links.textContent = "No outgoing transitions";
+    } else {
+      links.innerHTML = transitions
+        .slice(0, 4)
+        .map((transition) => {
+          const firstCondition = ensureArray(transition?.conditions)[0];
+          const summary = firstCondition ? formatStorybookConditionSummary(firstCondition) : "Condition";
+          return `${summary} -> ${String(transition?.nextNodeId || "-")}`;
+        })
+        .join("<br>");
+    }
+    card.appendChild(links);
+    root.appendChild(card);
+  }
 }
 
 function openAiOauthStatusText(config) {
@@ -938,6 +1852,24 @@ function setBasicTab(tabId) {
   });
 }
 
+function setSocialTab(tabId) {
+  const wanted = String(tabId || "simple");
+  selectedSocialTabId = wanted;
+  const buttons = document.querySelectorAll("[data-social-tab-btn]");
+  const panels = document.querySelectorAll("[data-social-tab-content]");
+  buttons.forEach((btn) => {
+    const active = String(btn.dataset.socialTabBtn || "") === wanted;
+    btn.classList.toggle("active", active);
+  });
+  panels.forEach((panel) => {
+    const active = String(panel.dataset.socialTabContent || "") === wanted;
+    panel.classList.toggle("active", active);
+  });
+  if (wanted === "status") {
+    refreshSocialStatus({ silent: true });
+  }
+}
+
 function initTabUi() {
   document.querySelectorAll("[data-main-tab-btn]").forEach((btn) => {
     btn.addEventListener("click", () => setMainTab(btn.dataset.mainTabBtn || "basic"));
@@ -945,8 +1877,12 @@ function initTabUi() {
   document.querySelectorAll("[data-basic-tab-btn]").forEach((btn) => {
     btn.addEventListener("click", () => setBasicTab(btn.dataset.basicTabBtn || "runtime"));
   });
+  document.querySelectorAll("[data-social-tab-btn]").forEach((btn) => {
+    btn.addEventListener("click", () => setSocialTab(btn.dataset.socialTabBtn || "simple"));
+  });
   setMainTab("basic");
   setBasicTab("runtime");
+  setSocialTab(selectedSocialTabId || "simple");
 }
 
 function isSameDocTarget(a, b) {
@@ -963,6 +1899,7 @@ function getDocTargetLabel(config, target) {
   if (target.kind === "world") return "Shared World Lore";
   if (target.kind === "directorGlobal") return "Director - Global Prompt";
   if (target.kind === "ambientGlobal") return "Ambient - Global Prompt";
+  if (target.kind === "storybookGlobal") return "Storybook - Global Prompt";
 
   if (target.kind === "npcDoc") {
     const npc = Array.isArray(config?.npcs) ? config.npcs[target.npcIndex] : null;
@@ -987,6 +1924,7 @@ function getDocTargetPath(config, target) {
   if (target.kind === "world") return String(config?.npc?.sharedDocs?.world || "");
   if (target.kind === "directorGlobal") return String(config?.npc?.director?.promptFile || "");
   if (target.kind === "ambientGlobal") return String(config?.npc?.ambient?.promptFile || "");
+  if (target.kind === "storybookGlobal") return String(config?.npc?.storybook?.promptFile || "");
 
   if (target.kind === "npcDoc") {
     const npc = Array.isArray(config?.npcs) ? config.npcs[target.npcIndex] : null;
@@ -1019,6 +1957,10 @@ function setDocTargetPath(config, target, nextPath) {
     config.npc = config.npc || {};
     config.npc.ambient = config.npc.ambient || {};
     config.npc.ambient.promptFile = p;
+  } else if (target.kind === "storybookGlobal") {
+    config.npc = config.npc || {};
+    config.npc.storybook = config.npc.storybook || {};
+    config.npc.storybook.promptFile = p;
   } else if (target.kind === "npcDoc") {
     const npc = Array.isArray(config?.npcs) ? config.npcs[target.npcIndex] : null;
     if (!npc) return;
@@ -2080,9 +3022,11 @@ async function loadConfigFromMainProcess() {
   setConfigEditor(currentConfig);
   renderNpcList(currentConfig);
   await loadQuickFormFromConfig(currentConfig);
+  syncStorybookFieldsFromConfig(currentConfig);
   if (runtimeStarted) {
     await refreshNpcVisuals({ silent: true });
   }
+  await refreshSocialStatus({ silent: true });
   return currentConfig;
 }
 
@@ -2099,6 +3043,7 @@ async function saveNpcSettingsOnly() {
   setConfigEditor(currentConfig);
   renderNpcList(currentConfig);
   syncNpcGlobalInputsFromConfig(currentConfig);
+  await refreshSocialStatus({ silent: true });
 }
 
 async function reloadNpcSettingsOnly() {
@@ -2115,6 +3060,8 @@ async function reloadNpcSettingsOnly() {
   setConfigEditor(currentConfig);
   renderNpcList(currentConfig);
   syncNpcGlobalInputsFromConfig(currentConfig);
+  syncStorybookFieldsFromConfig(currentConfig);
+  await refreshSocialStatus({ silent: true });
 }
 
 function buildScenePresetExportPack(preset) {
@@ -2314,6 +3261,10 @@ async function init() {
     "f-ambient-prompt-file",
     "f-ambient-prompt-text",
     "f-world-state-text",
+    "f-storybook-enabled",
+    "f-storybook-mode",
+    "f-storybook-prompt-file",
+    "f-storybook-prompt-text",
   ];
   for (const fieldId of npcGlobalFieldIds) {
     const el = $(fieldId);
@@ -2363,6 +3314,20 @@ async function init() {
   if (ambientPromptEditButton) {
     ambientPromptEditButton.addEventListener("click", async () => {
       await editTargetWithFallbackPick({ kind: "ambientGlobal" });
+    });
+  }
+
+  const storybookPromptPickButton = $("btn-storybook-prompt-pick");
+  if (storybookPromptPickButton) {
+    storybookPromptPickButton.addEventListener("click", async () => {
+      await pickMarkdownForTarget({ kind: "storybookGlobal" }, { openEditor: false });
+    });
+  }
+
+  const storybookPromptEditButton = $("btn-storybook-prompt-edit");
+  if (storybookPromptEditButton) {
+    storybookPromptEditButton.addEventListener("click", async () => {
+      await editTargetWithFallbackPick({ kind: "storybookGlobal" });
     });
   }
 
@@ -2492,11 +3457,254 @@ async function init() {
     });
   }
 
+  const bindStorybookField = (fieldId, handler, { event = "change" } = {}) => {
+    const el = $(fieldId);
+    if (!el) return;
+    el.addEventListener(event, () => {
+      currentConfig = applyStorybookFormToConfig(currentConfig || {});
+      if (typeof handler === "function") handler(el);
+      setConfigEditor(currentConfig);
+    });
+  };
+
+  const storybookGlobalFields = [
+    "f-storybook-enabled",
+    "f-storybook-mode",
+    "f-storybook-prompt-file",
+    "f-storybook-prompt-text",
+    "f-storybook-graph-label",
+    "f-storybook-graph-enabled",
+    "f-storybook-graph-scene-id",
+    "f-storybook-graph-scene-name",
+    "f-storybook-graph-entry-node-id",
+    "f-storybook-graph-notes",
+    "f-storybook-node-label",
+    "f-storybook-node-enabled",
+    "f-storybook-node-id",
+    "f-storybook-node-npc-ids",
+    "f-storybook-node-objective-text",
+    "f-storybook-node-stage-directions",
+    "f-storybook-transition-label",
+    "f-storybook-transition-next-node-id",
+    "f-storybook-transition-condition-type",
+    "f-storybook-transition-condition-distance-ft",
+    "f-storybook-transition-condition-timeout-seconds",
+    "f-storybook-transition-advanced-enabled",
+    "f-storybook-transition-conditions",
+  ];
+  for (const fieldId of storybookGlobalFields) {
+    const el = $(fieldId);
+    if (!el) continue;
+    const eventType = el.tagName === "INPUT" && el.type !== "checkbox" ? "input" : el.tagName === "TEXTAREA" ? "input" : "change";
+    el.addEventListener(eventType, () => {
+      currentConfig = applyStorybookFormToConfig(currentConfig || {});
+      setConfigEditor(currentConfig);
+    });
+    if (eventType === "input") {
+      el.addEventListener("change", () => {
+        currentConfig = applyStorybookFormToConfig(currentConfig || {});
+        setConfigEditor(currentConfig);
+      });
+    }
+  }
+
+  const storybookGraphSelect = $("f-storybook-graph-select");
+  if (storybookGraphSelect) {
+    storybookGraphSelect.addEventListener("change", () => {
+      currentConfig = applyStorybookFormToConfig(currentConfig || {});
+      selectStorybookGraph(currentConfig, storybookGraphSelect.value);
+      setConfigEditor(currentConfig);
+    });
+  }
+
+  const storybookNodeSelect = $("f-storybook-node-select");
+  if (storybookNodeSelect) {
+    storybookNodeSelect.addEventListener("change", () => {
+      currentConfig = applyStorybookFormToConfig(currentConfig || {});
+      selectStorybookNode(currentConfig, storybookNodeSelect.value);
+      setConfigEditor(currentConfig);
+    });
+  }
+
+  const storybookTransitionSelect = $("f-storybook-transition-select");
+  if (storybookTransitionSelect) {
+    storybookTransitionSelect.addEventListener("change", () => {
+      currentConfig = applyStorybookFormToConfig(currentConfig || {});
+      selectStorybookTransition(currentConfig, storybookTransitionSelect.value);
+      setConfigEditor(currentConfig);
+    });
+  }
+
+  const addGraphButtons = ["btn-storybook-graph-new", "btn-storybook-graph-add"];
+  for (const buttonId of addGraphButtons) {
+    const button = $(buttonId);
+    if (!button) continue;
+    button.addEventListener("click", () => {
+      currentConfig = ensureConfigShape(currentConfig || {});
+      currentConfig = applyStorybookFormToConfig(currentConfig);
+      currentConfig.npc.storybook = ensureStorybookShape(currentConfig.npc.storybook);
+      const graph = ensureStorybookGraphShape(
+        {
+          id: makeUniqueStorybookGraphId(currentConfig),
+          label: "New Graph",
+          enabled: true,
+          sceneId: "",
+          sceneName: "",
+          entryNodeId: "",
+          notes: "",
+          nodes: [],
+        },
+        Array.isArray(currentConfig?.npc?.storybook?.graphs) ? currentConfig.npc.storybook.graphs.length : 0
+      );
+      currentConfig.npc.storybook.graphs.push(graph);
+      selectedStorybookGraphId = String(graph.id || "");
+      selectedStorybookNodeId = "";
+      selectedStorybookTransitionId = "";
+      syncStorybookFieldsFromConfig(currentConfig);
+      setConfigEditor(currentConfig);
+      appendLog({ ts: Date.now(), level: "info", scope: "ui", message: `storybook graph created: ${graph.label}` });
+    });
+  }
+
+  const deleteGraphButton = $("btn-storybook-graph-delete");
+  if (deleteGraphButton) {
+    deleteGraphButton.addEventListener("click", () => {
+      currentConfig = ensureConfigShape(currentConfig || {});
+      const graph = getSelectedStorybookGraph(currentConfig);
+      if (!graph) return;
+      const answer = window.prompt(`'${graph.label || graph.id}' 그래프를 정말 삭제하시겠습니까?\n삭제하려면 yes 를 입력하세요.`);
+      if (String(answer || "").trim().toLowerCase() !== "yes") return;
+      currentConfig.npc.storybook.graphs = ensureArray(currentConfig.npc.storybook.graphs).filter(
+        (entry) => String(entry?.id || "") !== String(graph.id || "")
+      );
+      selectedStorybookGraphId = String(currentConfig.npc.storybook.graphs[0]?.id || "");
+      selectedStorybookNodeId = "";
+      selectedStorybookTransitionId = "";
+      syncStorybookFieldsFromConfig(currentConfig);
+      setConfigEditor(currentConfig);
+      appendLog({ ts: Date.now(), level: "info", scope: "ui", message: `storybook graph deleted: ${graph.label || graph.id}` });
+    });
+  }
+
+  const addNodeButtons = ["btn-storybook-node-new", "btn-storybook-node-add"];
+  for (const buttonId of addNodeButtons) {
+    const button = $(buttonId);
+    if (!button) continue;
+    button.addEventListener("click", () => {
+      currentConfig = ensureConfigShape(currentConfig || {});
+      currentConfig = applyStorybookFormToConfig(currentConfig);
+      const graph = getSelectedStorybookGraph(currentConfig);
+      if (!graph) {
+        appendLog({ ts: Date.now(), level: "warn", scope: "ui", message: "no storybook graph selected" });
+        return;
+      }
+      graph.nodes = ensureArray(graph.nodes);
+      const node = ensureStorybookNodeShape(
+        {
+          id: makeUniqueStorybookNodeId(graph),
+          label: "New Node",
+          enabled: true,
+          npcIds: [],
+          objectiveText: "",
+          stageDirections: "",
+          transitions: [],
+        },
+        graph.nodes.length
+      );
+      graph.nodes.push(node);
+      if (!graph.entryNodeId) graph.entryNodeId = String(node.id || "");
+      selectedStorybookGraphId = String(graph.id || "");
+      selectedStorybookNodeId = String(node.id || "");
+      selectedStorybookTransitionId = "";
+      syncStorybookFieldsFromConfig(currentConfig);
+      setConfigEditor(currentConfig);
+      appendLog({ ts: Date.now(), level: "info", scope: "ui", message: `storybook node created: ${node.label}` });
+    });
+  }
+
+  const deleteNodeButton = $("btn-storybook-node-delete");
+  if (deleteNodeButton) {
+    deleteNodeButton.addEventListener("click", () => {
+      currentConfig = ensureConfigShape(currentConfig || {});
+      const graph = getSelectedStorybookGraph(currentConfig);
+      const node = getSelectedStorybookNode(currentConfig);
+      if (!graph || !node) return;
+      const answer = window.prompt(`'${node.label || node.id}' 노드를 정말 삭제하시겠습니까?\n삭제하려면 yes 를 입력하세요.`);
+      if (String(answer || "").trim().toLowerCase() !== "yes") return;
+      graph.nodes = ensureArray(graph.nodes).filter((entry) => String(entry?.id || "") !== String(node.id || ""));
+      if (String(graph.entryNodeId || "") === String(node.id || "")) {
+        graph.entryNodeId = String(graph.nodes[0]?.id || "");
+      }
+      for (const nextNode of ensureArray(graph.nodes)) {
+        nextNode.transitions = ensureArray(nextNode.transitions).map((transition) => {
+          const next = ensureStorybookTransitionShape(transition);
+          if (String(next.nextNodeId || "") === String(node.id || "")) {
+            next.nextNodeId = String(graph.entryNodeId || graph.nodes[0]?.id || "");
+          }
+          return next;
+        });
+      }
+      selectedStorybookNodeId = String(graph.nodes[0]?.id || "");
+      selectedStorybookTransitionId = "";
+      syncStorybookFieldsFromConfig(currentConfig);
+      setConfigEditor(currentConfig);
+      appendLog({ ts: Date.now(), level: "info", scope: "ui", message: `storybook node deleted: ${node.label || node.id}` });
+    });
+  }
+
+  const addTransitionButtons = ["btn-storybook-transition-new", "btn-storybook-transition-add"];
+  for (const buttonId of addTransitionButtons) {
+    const button = $(buttonId);
+    if (!button) continue;
+    button.addEventListener("click", () => {
+      currentConfig = ensureConfigShape(currentConfig || {});
+      currentConfig = applyStorybookFormToConfig(currentConfig);
+      const node = getSelectedStorybookNode(currentConfig);
+      if (!node) {
+        appendLog({ ts: Date.now(), level: "warn", scope: "ui", message: "no storybook node selected" });
+        return;
+      }
+      node.transitions = ensureArray(node.transitions);
+      const transition = ensureStorybookTransitionShape(
+        {
+          id: makeUniqueStorybookTransitionId(node),
+          label: "New Transition",
+          nextNodeId: "",
+          conditions: [{ type: "always" }],
+        },
+        node.transitions.length
+      );
+      node.transitions.push(transition);
+      selectedStorybookTransitionId = String(transition.id || "");
+      syncStorybookFieldsFromConfig(currentConfig);
+      setConfigEditor(currentConfig);
+      appendLog({ ts: Date.now(), level: "info", scope: "ui", message: `storybook transition created: ${transition.label}` });
+    });
+  }
+
+  const deleteTransitionButton = $("btn-storybook-transition-delete");
+  if (deleteTransitionButton) {
+    deleteTransitionButton.addEventListener("click", () => {
+      currentConfig = ensureConfigShape(currentConfig || {});
+      const node = getSelectedStorybookNode(currentConfig);
+      const transition = getSelectedStorybookTransition(currentConfig);
+      if (!node || !transition) return;
+      const answer = window.prompt(`'${transition.label || transition.id}' 전이 규칙을 정말 삭제하시겠습니까?\n삭제하려면 yes 를 입력하세요.`);
+      if (String(answer || "").trim().toLowerCase() !== "yes") return;
+      node.transitions = ensureArray(node.transitions).filter((entry) => String(entry?.id || "") !== String(transition.id || ""));
+      selectedStorybookTransitionId = String(node.transitions[0]?.id || "");
+      syncStorybookFieldsFromConfig(currentConfig);
+      setConfigEditor(currentConfig);
+      appendLog({ ts: Date.now(), level: "info", scope: "ui", message: `storybook transition deleted: ${transition.label || transition.id}` });
+    });
+  }
+
   const saveSocialButton = $("btn-save-social");
   if (saveSocialButton) {
     saveSocialButton.addEventListener("click", async () => {
       saveSocialButton.disabled = true;
       try {
+        currentConfig = applyStorybookFormToConfig(currentConfig || {});
         await saveNpcSettingsOnly();
         appendLog({ ts: Date.now(), level: "info", scope: "ui", message: "social settings saved" });
       } catch (e) {
@@ -2750,6 +3958,7 @@ async function init() {
       runtimeStarted = true;
       appendLog({ ts: Date.now(), level: "info", scope: "ui", message: "runtime started" });
       await refreshNpcVisuals({ silent: false });
+      await refreshSocialStatus({ silent: true });
     } catch (e) {
       appendLog({ ts: Date.now(), level: "error", scope: "ui", message: `start failed: ${e?.message || e}` });
     } finally {
@@ -2763,6 +3972,7 @@ async function init() {
       await window.api.stopRuntime();
       runtimeStarted = false;
       appendLog({ ts: Date.now(), level: "info", scope: "ui", message: "runtime stopped" });
+      await refreshSocialStatus({ silent: true });
     } catch (e) {
       appendLog({ ts: Date.now(), level: "error", scope: "ui", message: `stop failed: ${e?.message || e}` });
     } finally {
@@ -2799,6 +4009,13 @@ async function init() {
       renderNpcList(currentConfig);
     }
   });
+
+  if (socialStatusPollTimer) {
+    window.clearInterval(socialStatusPollTimer);
+  }
+  socialStatusPollTimer = window.setInterval(() => {
+    refreshSocialStatus({ silent: true });
+  }, 5000);
 }
 
 init().catch((e) => {
