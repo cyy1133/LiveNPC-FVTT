@@ -4,7 +4,7 @@ const { Client, Events, GatewayIntentBits } = require("discord.js");
 const dotenv = require("dotenv");
 
 const { Logger } = require("./logger");
-const { completeJson } = require("./llm/openai-client");
+const { completeJson, normalizePreferredApi } = require("./llm/openai-client");
 const { login: openaiOauthLogin, refreshToken: openaiOauthRefresh } = require("./llm/openai-codex-oauth");
 const {
   normalizeCodexBin,
@@ -12,6 +12,12 @@ const {
   launchLogin: launchCodexLogin,
   completeStructured: codexCompleteStructured,
 } = require("./llm/codex-cli-client");
+const {
+  resolveVertexConfig,
+  resolveVertexRequestConfig,
+  getVertexProviderStatus,
+  launchVertexGcloudLogin,
+} = require("./llm/vertex-ai-client");
 const { ensureCodexPrerequisites } = require("./setup/prereq-manager");
 
 // Foundry automation layer (Playwright + in-page scripts)
@@ -5618,7 +5624,12 @@ class AppRuntime {
           await this._completeNpcJson({ config, prompt, timeoutMs: 35_000 });
           result.llm = { ok: true, provider, detail: `codex login ok + completion ok (${codex.model})` };
         }
-      } else if (provider === "openai-api-key" || provider === "openai-oauth") {
+      } else if (
+        provider === "openai-api-key" ||
+        provider === "openai-oauth" ||
+        provider === "vertex-ai" ||
+        provider === "openai-compatible"
+      ) {
         const prompt = [
           "Return a single JSON object only. No extra text.",
           '{ "replyText": "ok", "intent": { "type": "none", "args": {} } }',
@@ -5785,7 +5796,12 @@ class AppRuntime {
   }
 
   _getLlmProvider(config) {
-    return String(config?.llm?.provider || "codex-cli").trim().toLowerCase();
+    const raw = String(config?.llm?.provider || "codex-cli").trim().toLowerCase();
+    if (raw === "vertex" || raw === "vertexai") return "vertex-ai";
+    if (raw === "openai-compatible-api" || raw === "compatible" || raw === "custom-openai") {
+      return "openai-compatible";
+    }
+    return raw || "codex-cli";
   }
 
   _getCodexCliConfig(config) {
@@ -5843,6 +5859,54 @@ class AppRuntime {
     throw new Error(`Unsupported LLM provider: ${provider}`);
   }
 
+  _getOpenAiCompatibleConfig(config) {
+    const compatible = config?.llm?.openaiCompatible || config?.llm?.compatible || {};
+    return {
+      baseUrl: String(compatible.baseUrl || "").trim(),
+      model: String(compatible.model || "gpt-4o-mini").trim() || "gpt-4o-mini",
+      apiKey: String(compatible.apiKey || "").trim(),
+      preferredApi: normalizePreferredApi(compatible.preferredApi || "auto"),
+    };
+  }
+
+  async _getApiProviderRequestConfig(config) {
+    const provider = this._getLlmProvider(config);
+
+    if (provider === "openai-api-key" || provider === "openai-oauth") {
+      const openai = config?.llm?.openai || {};
+      return {
+        provider,
+        baseUrl: String(openai.apiBaseUrl || "https://api.openai.com").trim(),
+        model: String(openai.model || "gpt-5").trim() || "gpt-5",
+        apiKey: await this._getOpenAiApiKeyForConfig(config),
+        preferredApi: "auto",
+      };
+    }
+
+    if (provider === "openai-compatible") {
+      const compatible = this._getOpenAiCompatibleConfig(config);
+      if (!compatible.baseUrl) {
+        throw new Error("Missing OpenAI-compatible base URL in config");
+      }
+      if (!compatible.apiKey) {
+        throw new Error("Missing OpenAI-compatible API key in config");
+      }
+      return {
+        provider,
+        baseUrl: compatible.baseUrl,
+        model: compatible.model,
+        apiKey: compatible.apiKey,
+        preferredApi: compatible.preferredApi,
+      };
+    }
+
+    if (provider === "vertex-ai") {
+      return resolveVertexRequestConfig({ config });
+    }
+
+    throw new Error(`Unsupported LLM provider: ${provider}`);
+  }
+
   async _completeNpcJson({ config, prompt, timeoutMs = 90_000, traceMeta = null }) {
     const provider = this._getLlmProvider(config);
     const traceCtx = isPlainObject(traceMeta) ? traceMeta : {};
@@ -5886,24 +5950,24 @@ class AppRuntime {
         };
       }
 
-      if (provider === "openai-api-key" || provider === "openai-oauth") {
-        const openai = config?.llm?.openai || {};
-        const baseUrl = String(openai.apiBaseUrl || "https://api.openai.com").trim();
-        const model = String(openai.model || "gpt-5").trim();
-        const apiKey = await this._getOpenAiApiKeyForConfig(config);
+      if (provider === "openai-api-key" || provider === "openai-oauth" || provider === "openai-compatible" || provider === "vertex-ai") {
+        const requestConfig = await this._getApiProviderRequestConfig(config);
         const completion = await completeJson({
-          baseUrl,
-          apiKey,
-          model,
+          baseUrl: requestConfig.baseUrl,
+          apiKey: requestConfig.apiKey,
+          model: requestConfig.model,
           prompt,
           timeoutMs,
+          preferredApi: requestConfig.preferredApi,
         });
         this._trace("llm.response", {
           ...traceCtx,
           provider,
           api: completion?.api || "unknown",
-          model,
-          baseUrl,
+          model: requestConfig.model,
+          baseUrl: requestConfig.baseUrl,
+          preferredApi: requestConfig.preferredApi,
+          authSource: requestConfig.authSource || "",
           parsed: completion?.parsed,
           text: this._traceIncludeLlmRaw ? String(completion?.text || "") : "[omitted]",
           raw: this._traceIncludeLlmRaw ? completion?.raw : "[omitted]",
@@ -7257,6 +7321,72 @@ class AppRuntime {
   async launchCodexLoginForUser({ config } = {}) {
     const codex = this._getCodexCliConfig(config || {});
     return launchCodexLogin({ codexBin: codex.binPath });
+  }
+
+  async getProviderStatusForUser({ config } = {}) {
+    const cfg = config || {};
+    const provider = this._getLlmProvider(cfg);
+
+    if (provider === "codex-cli") {
+      return this.getCodexLoginStatusForUser({ config: cfg });
+    }
+
+    if (provider === "openai-oauth") {
+      const oauth = cfg?.llm?.openai?.oauth || {};
+      const access = String(oauth.accessToken || "").trim();
+      const refresh = String(oauth.refreshToken || "").trim();
+      const expiresAtMs = Number(oauth.expiresAtMs || 0);
+      if (!access || !refresh) {
+        return { ok: false, detail: "OpenAI OAuth not logged in" };
+      }
+      if (!expiresAtMs) {
+        return { ok: true, detail: "OpenAI OAuth token present" };
+      }
+      const minutes = Math.floor((expiresAtMs - Date.now()) / 60_000);
+      if (minutes <= 0) {
+        return { ok: true, detail: "OpenAI OAuth token expired; will refresh on request" };
+      }
+      return { ok: true, detail: `OpenAI OAuth token ok (${minutes} min left)` };
+    }
+
+    if (provider === "openai-api-key") {
+      const apiKey = String(cfg?.llm?.openai?.apiKey || "").trim();
+      return {
+        ok: Boolean(apiKey),
+        detail: apiKey ? "OpenAI API key configured" : "Missing OpenAI API key",
+      };
+    }
+
+    if (provider === "openai-compatible") {
+      const compatible = this._getOpenAiCompatibleConfig(cfg);
+      if (!compatible.baseUrl) {
+        return { ok: false, detail: "Missing compatible API base URL" };
+      }
+      if (!compatible.apiKey) {
+        return { ok: false, detail: "Missing compatible API key" };
+      }
+      return {
+        ok: true,
+        detail: `Compatible API configured (${compatible.preferredApi})`,
+      };
+    }
+
+    if (provider === "vertex-ai") {
+      return getVertexProviderStatus({ config: cfg });
+    }
+
+    return {
+      ok: false,
+      detail: `unsupported provider: ${provider}`,
+    };
+  }
+
+  async launchVertexAiLoginForUser({ config } = {}) {
+    const vertex = resolveVertexConfig(config || {});
+    if (vertex.authMode !== "gcloud-cli") {
+      return { ok: false, error: "Vertex AI login launcher is only used with gcloud-cli auth mode" };
+    }
+    return launchVertexGcloudLogin({ gcloudPath: vertex.gcloudPath });
   }
 
   async ensurePrerequisitesForConfig({ config } = {}) {

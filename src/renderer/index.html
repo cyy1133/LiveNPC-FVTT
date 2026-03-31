@@ -110,6 +110,8 @@
                 <option value="codex-cli">Codex CLI (ChatGPT subscription)</option>
                 <option value="openai-oauth">OpenAI OAuth</option>
                 <option value="openai-api-key">OpenAI API Key</option>
+                <option value="vertex-ai">Vertex AI (Gemini on Google Cloud)</option>
+                <option value="openai-compatible">OpenAI-Compatible API</option>
               </select>
             </div>
             <div class="field">
@@ -117,8 +119,27 @@
               <input id="f-openai-model" type="text" placeholder="gpt-5.3-codex" />
             </div>
             <div class="field" id="f-openai-key-wrap">
-              <label for="f-openai-key">OpenAI API Key</label>
+              <label id="f-openai-key-label" for="f-openai-key">OpenAI API Key</label>
               <input id="f-openai-key" type="password" placeholder="sk-..." />
+            </div>
+            <div class="field" id="f-api-base-url-wrap" style="display: none">
+              <label for="f-api-base-url">API Base URL</label>
+              <input id="f-api-base-url" type="text" placeholder="https://host.example.com/v1" />
+            </div>
+            <div class="field" id="f-vertex-project-wrap" style="display: none">
+              <label for="f-vertex-project">Vertex Project ID</label>
+              <input id="f-vertex-project" type="text" placeholder="my-gcp-project" />
+            </div>
+            <div class="field" id="f-vertex-location-wrap" style="display: none">
+              <label for="f-vertex-location">Vertex Location</label>
+              <input id="f-vertex-location" type="text" placeholder="global" />
+            </div>
+            <div class="field" id="f-vertex-auth-wrap" style="display: none">
+              <label for="f-vertex-auth">Vertex Auth</label>
+              <select id="f-vertex-auth">
+                <option value="gcloud-cli">gcloud CLI</option>
+                <option value="access-token">Access Token</option>
+              </select>
             </div>
             <div class="field" id="f-codex-bin-wrap">
               <label for="f-codex-bin">Codex CLI Path (optional)</label>

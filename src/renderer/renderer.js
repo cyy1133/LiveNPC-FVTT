@@ -114,7 +114,59 @@ function setConfigEditor(config) {
 }
 
 function getProvider(config) {
-  return String(config?.llm?.provider || "codex-cli").trim().toLowerCase();
+  const raw = String(config?.llm?.provider || "codex-cli").trim().toLowerCase();
+  if (raw === "vertex" || raw === "vertexai") return "vertex-ai";
+  if (raw === "openai-compatible-api" || raw === "compatible" || raw === "custom-openai") {
+    return "openai-compatible";
+  }
+  return raw || "codex-cli";
+}
+
+function getVertexAuthMode(config) {
+  const raw = String(config?.llm?.vertexAi?.authMode || "gcloud-cli").trim().toLowerCase();
+  return raw === "access-token" || raw === "token" || raw === "manual" ? "access-token" : "gcloud-cli";
+}
+
+function getProviderModel(config, provider = getProvider(config)) {
+  if (provider === "codex-cli") {
+    return String(config?.llm?.codexCli?.model || "gpt-5.3-codex");
+  }
+  if (provider === "vertex-ai") {
+    return String(config?.llm?.vertexAi?.model || "google/gemini-2.5-flash");
+  }
+  if (provider === "openai-compatible") {
+    return String(config?.llm?.openaiCompatible?.model || "gpt-4o-mini");
+  }
+  return String(config?.llm?.openai?.model || "gpt-5");
+}
+
+function getProviderSecretValue(config, provider = getProvider(config)) {
+  if (provider === "vertex-ai") {
+    return getVertexAuthMode(config) === "access-token" ? String(config?.llm?.vertexAi?.accessToken || "") : "";
+  }
+  if (provider === "openai-compatible") {
+    return String(config?.llm?.openaiCompatible?.apiKey || "");
+  }
+  return String(config?.llm?.openai?.apiKey || "");
+}
+
+function syncQuickLlmProviderFieldsFromConfig(config) {
+  const provider = getProvider(config);
+  $("f-llm-provider").value = provider;
+  $("f-openai-model").value = getProviderModel(config, provider);
+  $("f-openai-key").value = getProviderSecretValue(config, provider);
+  if ($("f-api-base-url")) {
+    $("f-api-base-url").value = String(config?.llm?.openaiCompatible?.baseUrl || "");
+  }
+  if ($("f-vertex-project")) {
+    $("f-vertex-project").value = String(config?.llm?.vertexAi?.projectId || "");
+  }
+  if ($("f-vertex-location")) {
+    $("f-vertex-location").value = String(config?.llm?.vertexAi?.location || "global");
+  }
+  if ($("f-vertex-auth")) {
+    $("f-vertex-auth").value = getVertexAuthMode(config);
+  }
 }
 
 function normalizeDirectorMode(value) {
@@ -374,6 +426,33 @@ function ensureConfigShape(config) {
     ensureScenePresetShape(preset, idx, out.npc.director, out.npc.ambient)
   );
   out.npc.storybook = ensureStorybookShape(out.npc.storybook);
+
+  out.llm = out.llm && typeof out.llm === "object" ? out.llm : {};
+  out.llm.provider = getProvider(out);
+  out.llm.codexCli = out.llm.codexCli && typeof out.llm.codexCli === "object" ? out.llm.codexCli : {};
+  out.llm.codexCli.binPath = String(out.llm.codexCli.binPath || "");
+  out.llm.codexCli.model = String(out.llm.codexCli.model || "gpt-5.3-codex");
+  out.llm.openai = out.llm.openai && typeof out.llm.openai === "object" ? out.llm.openai : {};
+  out.llm.openai.apiBaseUrl = String(out.llm.openai.apiBaseUrl || "https://api.openai.com");
+  out.llm.openai.model = String(out.llm.openai.model || "gpt-5");
+  out.llm.openai.apiKey = String(out.llm.openai.apiKey || "");
+  out.llm.openai.oauth = out.llm.openai.oauth && typeof out.llm.openai.oauth === "object" ? out.llm.openai.oauth : {};
+  out.llm.openai.oauth.accessToken = String(out.llm.openai.oauth.accessToken || "");
+  out.llm.openai.oauth.refreshToken = String(out.llm.openai.oauth.refreshToken || "");
+  out.llm.openai.oauth.expiresAtMs = Number(out.llm.openai.oauth.expiresAtMs || 0) || 0;
+  out.llm.vertexAi = out.llm.vertexAi && typeof out.llm.vertexAi === "object" ? out.llm.vertexAi : {};
+  out.llm.vertexAi.projectId = String(out.llm.vertexAi.projectId || "");
+  out.llm.vertexAi.location = String(out.llm.vertexAi.location || "global");
+  out.llm.vertexAi.model = String(out.llm.vertexAi.model || "google/gemini-2.5-flash");
+  out.llm.vertexAi.authMode = getVertexAuthMode(out);
+  out.llm.vertexAi.accessToken = String(out.llm.vertexAi.accessToken || "");
+  out.llm.vertexAi.gcloudPath = String(out.llm.vertexAi.gcloudPath || "");
+  out.llm.openaiCompatible =
+    out.llm.openaiCompatible && typeof out.llm.openaiCompatible === "object" ? out.llm.openaiCompatible : {};
+  out.llm.openaiCompatible.baseUrl = String(out.llm.openaiCompatible.baseUrl || "");
+  out.llm.openaiCompatible.model = String(out.llm.openaiCompatible.model || "gpt-4o-mini");
+  out.llm.openaiCompatible.apiKey = String(out.llm.openaiCompatible.apiKey || "");
+  out.llm.openaiCompatible.preferredApi = String(out.llm.openaiCompatible.preferredApi || "auto");
 
   out.imageGeneration =
     out.imageGeneration && typeof out.imageGeneration === "object" ? out.imageGeneration : {};
@@ -1659,44 +1738,103 @@ async function codexLoginStatusText(config) {
 }
 
 async function refreshProviderStatus(config) {
-  const provider = getProvider(config);
   const statusEl = $("oauth-status");
   if (!statusEl) return;
+  statusEl.textContent = "Checking provider status...";
 
+  try {
+    if (window.api?.getProviderStatus) {
+      const result = await window.api.getProviderStatus(config);
+      if (result?.detail) {
+        statusEl.textContent = String(result.detail);
+        return;
+      }
+    }
+  } catch {
+    // fall through to local fallback text
+  }
+
+  const provider = getProvider(config);
   if (provider === "codex-cli") {
-    statusEl.textContent = "Checking Codex login status...";
     statusEl.textContent = await codexLoginStatusText(config);
     return;
   }
-
   if (provider === "openai-oauth") {
     statusEl.textContent = openAiOauthStatusText(config);
     return;
   }
-
+  if (provider === "vertex-ai") {
+    statusEl.textContent =
+      getVertexAuthMode(config) === "gcloud-cli"
+        ? "Vertex AI via gcloud CLI"
+        : "Vertex AI manual access token mode";
+    return;
+  }
+  if (provider === "openai-compatible") {
+    statusEl.textContent = "OpenAI-compatible API key mode";
+    return;
+  }
   statusEl.textContent = "API key mode (no login button required)";
 }
 
 function updateQuickSetupUi(config) {
   const provider = getProvider(config);
+  const vertexAuthMode = getVertexAuthMode(config);
   $("f-llm-provider").value = provider;
-  $("f-openai-key-wrap").style.display = provider === "openai-api-key" ? "flex" : "none";
+  const showGenericKey =
+    provider === "openai-api-key" ||
+    provider === "openai-compatible" ||
+    (provider === "vertex-ai" && vertexAuthMode === "access-token");
+  $("f-openai-key-wrap").style.display = showGenericKey ? "flex" : "none";
+  if ($("f-api-base-url-wrap")) {
+    $("f-api-base-url-wrap").style.display = provider === "openai-compatible" ? "flex" : "none";
+  }
+  if ($("f-vertex-project-wrap")) {
+    $("f-vertex-project-wrap").style.display = provider === "vertex-ai" ? "flex" : "none";
+  }
+  if ($("f-vertex-location-wrap")) {
+    $("f-vertex-location-wrap").style.display = provider === "vertex-ai" ? "flex" : "none";
+  }
+  if ($("f-vertex-auth-wrap")) {
+    $("f-vertex-auth-wrap").style.display = provider === "vertex-ai" ? "flex" : "none";
+  }
 
   const headerBtn = $("btn-oauth");
   const inlineBtn = $("btn-oauth-inline");
-  const needsLoginButton = provider === "codex-cli" || provider === "openai-oauth";
+  const needsLoginButton =
+    provider === "codex-cli" || provider === "openai-oauth" || (provider === "vertex-ai" && vertexAuthMode === "gcloud-cli");
+  const loginLabel =
+    provider === "codex-cli" ? "Codex Login" : provider === "openai-oauth" ? "OpenAI OAuth" : "gcloud Login";
   if (headerBtn) {
     headerBtn.disabled = !needsLoginButton;
-    headerBtn.textContent = provider === "codex-cli" ? "Codex Login" : "OpenAI OAuth";
+    headerBtn.textContent = loginLabel;
   }
   if (inlineBtn) {
     inlineBtn.disabled = !needsLoginButton;
-    inlineBtn.textContent = provider === "codex-cli" ? "Codex Login" : "OAuth Login";
+    inlineBtn.textContent = loginLabel;
   }
 
   const modelLabel = $("f-model-label");
   if (modelLabel) {
-    modelLabel.textContent = provider === "codex-cli" ? "Codex Model" : "OpenAI Model";
+    modelLabel.textContent =
+      provider === "codex-cli"
+        ? "Codex Model"
+        : provider === "vertex-ai"
+          ? "Vertex Model"
+          : provider === "openai-compatible"
+            ? "Compatible Model"
+            : "OpenAI Model";
+  }
+
+  const keyLabel = $("f-openai-key-label");
+  const keyInput = $("f-openai-key");
+  if (keyLabel) {
+    keyLabel.textContent =
+      provider === "vertex-ai" ? "Vertex Access Token" : provider === "openai-compatible" ? "API Key / Bearer Token" : "OpenAI API Key";
+  }
+  if (keyInput) {
+    keyInput.placeholder =
+      provider === "vertex-ai" ? "ya29...." : provider === "openai-compatible" ? "provider-specific secret" : "sk-...";
   }
 
   const codexWrap = $("f-codex-bin-wrap");
@@ -1722,13 +1860,7 @@ async function loadQuickFormFromConfig(config) {
     $("f-fvtt-sessions-json").value = formatJsonArrayText(config?.foundry?.sessions || []);
   }
 
-  const provider = getProvider(config);
-  $("f-llm-provider").value = provider;
-
-  const codexModel = String(config?.llm?.codexCli?.model || "gpt-5.3-codex");
-  const openaiModel = String(config?.llm?.openai?.model || "gpt-5");
-  $("f-openai-model").value = provider === "codex-cli" ? codexModel : openaiModel;
-  $("f-openai-key").value = String(config?.llm?.openai?.apiKey || "");
+  syncQuickLlmProviderFieldsFromConfig(config);
 
   const codexBinInput = $("f-codex-bin");
   if (codexBinInput) {
@@ -1772,19 +1904,43 @@ function applyQuickFormToConfig(config) {
   config.llm.openai = config.llm.openai || {};
   config.llm.openai.apiBaseUrl = String(config.llm.openai.apiBaseUrl || "https://api.openai.com");
   config.llm.openai.model = String(config.llm.openai.model || "gpt-5");
-  config.llm.openai.apiKey = String($("f-openai-key").value || "");
   config.llm.openai.oauth = config.llm.openai.oauth || {
     accessToken: "",
     refreshToken: "",
     expiresAtMs: 0,
   };
+  config.llm.vertexAi = config.llm.vertexAi || {};
+  config.llm.vertexAi.projectId = String($("f-vertex-project")?.value || config.llm.vertexAi.projectId || "").trim();
+  config.llm.vertexAi.location = String($("f-vertex-location")?.value || config.llm.vertexAi.location || "global").trim() || "global";
+  config.llm.vertexAi.authMode = getVertexAuthMode({
+    llm: {
+      vertexAi: {
+        authMode: String($("f-vertex-auth")?.value || config.llm.vertexAi.authMode || "gcloud-cli"),
+      },
+    },
+  });
+  config.llm.vertexAi.gcloudPath = String(config.llm.vertexAi.gcloudPath || "").trim();
+  config.llm.openaiCompatible = config.llm.openaiCompatible || {};
+  config.llm.openaiCompatible.baseUrl = String($("f-api-base-url")?.value || config.llm.openaiCompatible.baseUrl || "").trim();
+  config.llm.openaiCompatible.preferredApi = String(config.llm.openaiCompatible.preferredApi || "auto").trim().toLowerCase() || "auto";
 
   config.llm.codexCli = config.llm.codexCli || {};
   const modelInput = String($("f-openai-model").value || "").trim();
   if (config.llm.provider === "codex-cli") {
     config.llm.codexCli.model = modelInput || "gpt-5.3-codex";
-  } else {
+  } else if (config.llm.provider === "openai-api-key" || config.llm.provider === "openai-oauth") {
     config.llm.openai.model = modelInput || "gpt-5";
+    if (config.llm.provider === "openai-api-key") {
+      config.llm.openai.apiKey = String($("f-openai-key").value || "");
+    }
+  } else if (config.llm.provider === "vertex-ai") {
+    config.llm.vertexAi.model = modelInput || "google/gemini-2.5-flash";
+    if (config.llm.vertexAi.authMode === "access-token") {
+      config.llm.vertexAi.accessToken = String($("f-openai-key").value || "");
+    }
+  } else if (config.llm.provider === "openai-compatible") {
+    config.llm.openaiCompatible.model = modelInput || "gpt-4o-mini";
+    config.llm.openaiCompatible.apiKey = String($("f-openai-key").value || "");
   }
 
   const codexBinInput = $("f-codex-bin");
@@ -3204,6 +3360,22 @@ async function doProviderLogin() {
     return;
   }
 
+  if (provider === "vertex-ai" && getVertexAuthMode(currentConfig) === "gcloud-cli") {
+    appendLog({ ts: Date.now(), level: "info", scope: "ui", message: "Launching gcloud login terminal..." });
+    const res = await window.api.launchVertexAiLogin(currentConfig);
+    if (!res?.ok) {
+      throw new Error(res?.error || "failed to launch gcloud login");
+    }
+    appendLog({
+      ts: Date.now(),
+      level: "info",
+      scope: "ui",
+      message: "Complete gcloud login in the opened terminal, then run diagnostics.",
+    });
+    await refreshProviderStatus(currentConfig);
+    return;
+  }
+
   appendLog({
     ts: Date.now(),
     level: "info",
@@ -3228,10 +3400,22 @@ async function init() {
   // Quick setup
   $("f-llm-provider").addEventListener("change", async () => {
     currentConfig = applyQuickFormToConfig(currentConfig || {});
+    syncQuickLlmProviderFieldsFromConfig(currentConfig);
     updateQuickSetupUi(currentConfig);
     setConfigEditor(currentConfig);
     await refreshProviderStatus(currentConfig);
   });
+
+  const vertexAuthInput = $("f-vertex-auth");
+  if (vertexAuthInput) {
+    vertexAuthInput.addEventListener("change", async () => {
+      currentConfig = applyQuickFormToConfig(currentConfig || {});
+      syncQuickLlmProviderFieldsFromConfig(currentConfig);
+      updateQuickSetupUi(currentConfig);
+      setConfigEditor(currentConfig);
+      await refreshProviderStatus(currentConfig);
+    });
+  }
 
   const worldInput = $("f-world-doc");
   if (worldInput) {

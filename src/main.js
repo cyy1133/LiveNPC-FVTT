@@ -179,6 +179,20 @@ ipcMain.handle("codex:login:launch", async (_evt, { config } = {}) => {
   return rt.launchCodexLoginForUser({ config: nextConfig });
 });
 
+ipcMain.handle("llm:provider:status", async (_evt, { config } = {}) => {
+  const configPath = getDefaultConfigPath(app.getPath("userData"));
+  const nextConfig = config && typeof config === "object" ? config : await loadAppConfig(configPath);
+  const rt = ensureRuntime();
+  return rt.getProviderStatusForUser({ config: nextConfig });
+});
+
+ipcMain.handle("vertex:login:launch", async (_evt, { config } = {}) => {
+  const configPath = getDefaultConfigPath(app.getPath("userData"));
+  const nextConfig = config && typeof config === "object" ? config : await loadAppConfig(configPath);
+  const rt = ensureRuntime();
+  return rt.launchVertexAiLoginForUser({ config: nextConfig });
+});
+
 ipcMain.handle("setup:installPrerequisites", async (_evt, { config } = {}) => {
   const configPath = getDefaultConfigPath(app.getPath("userData"));
   const nextConfig = config && typeof config === "object" ? config : await loadAppConfig(configPath);

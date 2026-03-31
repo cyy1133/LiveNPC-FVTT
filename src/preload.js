@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld("api", {
     return () => ipcRenderer.removeListener("log:entry", listener);
   },
   oauthLoginOpenAiCodex: () => ipcRenderer.invoke("oauth:openai:login"),
+  getProviderStatus: (config) => ipcRenderer.invoke("llm:provider:status", { config }),
+  launchVertexAiLogin: (config) => ipcRenderer.invoke("vertex:login:launch", { config }),
   onOauthPrompt: (handler) => {
     const listener = (_evt, payload) => handler(payload);
     ipcRenderer.on("oauth:prompt", listener);

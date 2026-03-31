@@ -2,10 +2,17 @@ function normalizeBaseUrl(baseUrl) {
   const raw = String(baseUrl || "https://api.openai.com").trim();
   try {
     const url = new URL(raw);
-    return url.origin;
+    return url.href.replace(/\/+$/, "");
   } catch {
     return "https://api.openai.com";
   }
+}
+
+function normalizePreferredApi(value) {
+  const raw = String(value || "auto").trim().toLowerCase();
+  if (raw === "responses" || raw === "response") return "responses";
+  if (raw === "chat-completions" || raw === "chat.completions" || raw === "chat") return "chat-completions";
+  return "auto";
 }
 
 function extractJsonObject(mixedText) {
@@ -40,6 +47,8 @@ async function createResponse({
   model,
   inputText,
   timeoutMs = 90_000,
+  extraHeaders = null,
+  extraBody = null,
 } = {}) {
   const origin = normalizeBaseUrl(baseUrl);
   const url = `${origin}/v1/responses`;
@@ -52,10 +61,12 @@ async function createResponse({
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
+        ...(extraHeaders && typeof extraHeaders === "object" ? extraHeaders : {}),
       },
       body: JSON.stringify({
         model,
         input: inputText,
+        ...(extraBody && typeof extraBody === "object" ? extraBody : {}),
       }),
       signal: controller.signal,
     });
@@ -80,6 +91,8 @@ async function createChatCompletion({
   model,
   inputText,
   timeoutMs = 90_000,
+  extraHeaders = null,
+  extraBody = null,
 } = {}) {
   const origin = normalizeBaseUrl(baseUrl);
   const url = `${origin}/v1/chat/completions`;
@@ -92,11 +105,13 @@ async function createChatCompletion({
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
+        ...(extraHeaders && typeof extraHeaders === "object" ? extraHeaders : {}),
       },
       body: JSON.stringify({
         model,
         messages: [{ role: "user", content: inputText }],
         temperature: 0.2,
+        ...(extraBody && typeof extraBody === "object" ? extraBody : {}),
       }),
       signal: controller.signal,
     });
@@ -159,7 +174,43 @@ async function completeJson({
   model,
   prompt,
   timeoutMs,
+  preferredApi = "auto",
+  extraHeaders = null,
+  responseBody = null,
+  chatBody = null,
 } = {}) {
+  const mode = normalizePreferredApi(preferredApi);
+
+  if (mode === "chat-completions") {
+    const raw = await createChatCompletion({
+      baseUrl,
+      apiKey,
+      model,
+      inputText: prompt,
+      timeoutMs,
+      extraHeaders,
+      extraBody: chatBody,
+    });
+    const text = pickTextFromChatCompletions(raw);
+    const parsed = extractJsonObject(text);
+    return { raw, text, parsed, api: "chat.completions" };
+  }
+
+  if (mode === "responses") {
+    const raw = await createResponse({
+      baseUrl,
+      apiKey,
+      model,
+      inputText: prompt,
+      timeoutMs,
+      extraHeaders,
+      extraBody: responseBody,
+    });
+    const text = pickTextFromResponsesApi(raw);
+    const parsed = extractJsonObject(text);
+    return { raw, text, parsed, api: "responses" };
+  }
+
   try {
     const raw = await createResponse({
       baseUrl,
@@ -167,41 +218,42 @@ async function completeJson({
       model,
       inputText: prompt,
       timeoutMs,
+      extraHeaders,
+      extraBody: responseBody,
     });
     const text = pickTextFromResponsesApi(raw);
     const parsed = extractJsonObject(text);
     return { raw, text, parsed, api: "responses" };
   } catch (e) {
-    if (shouldFallbackToChatCompletions(e)) {
-      let fallbackError = null;
-      try {
-        const raw = await createChatCompletion({
-          baseUrl,
-          apiKey,
-          model,
-          inputText: prompt,
-          timeoutMs,
-        });
-        const text = pickTextFromChatCompletions(raw);
-        const parsed = extractJsonObject(text);
-        return { raw, text, parsed, api: "chat.completions" };
-      } catch (inner) {
-        fallbackError = inner;
-      }
+    if (!shouldFallbackToChatCompletions(e)) throw e;
 
-      const combined = new Error(
-        `OpenAI responses failed, and fallback chat.completions also failed. responses=[${
-          e?.message || e
-        }] fallback=[${fallbackError?.message || fallbackError}]`
-      );
-      combined.primary = e;
-      combined.fallback = fallbackError;
-      throw combined;
+    let fallbackError = null;
+    try {
+      const raw = await createChatCompletion({
+        baseUrl,
+        apiKey,
+        model,
+        inputText: prompt,
+        timeoutMs,
+        extraHeaders,
+        extraBody: chatBody,
+      });
+      const text = pickTextFromChatCompletions(raw);
+      const parsed = extractJsonObject(text);
+      return { raw, text, parsed, api: "chat.completions" };
+    } catch (inner) {
+      fallbackError = inner;
     }
 
-    // Non-fallback errors are propagated as-is.
-    throw e;
+    const combined = new Error(
+      `OpenAI responses failed, and fallback chat.completions also failed. responses=[${
+        e?.message || e
+      }] fallback=[${fallbackError?.message || fallbackError}]`
+    );
+    combined.primary = e;
+    combined.fallback = fallbackError;
+    throw combined;
   }
 }
 
-module.exports = { createResponse, createChatCompletion, completeJson };
+module.exports = { createResponse, createChatCompletion, completeJson, normalizePreferredApi };

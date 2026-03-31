@@ -43,6 +43,20 @@
         "refreshToken": "",
         "expiresAtMs": 0
       }
+    },
+    "vertexAi": {
+      "projectId": "",
+      "location": "global",
+      "model": "google/gemini-2.5-flash",
+      "authMode": "gcloud-cli",
+      "accessToken": "",
+      "gcloudPath": ""
+    },
+    "openaiCompatible": {
+      "baseUrl": "",
+      "model": "gpt-4o-mini",
+      "apiKey": "",
+      "preferredApi": "auto"
     }
   },
   "runtime": {

@@ -136,7 +136,7 @@ function defaultConfig(defaultDocs = {}) {
       combatAutoTurn: true,
     },
     llm: {
-      provider: "codex-cli", // codex-cli | openai-oauth | openai-api-key
+      provider: "codex-cli", // codex-cli | openai-oauth | openai-api-key | vertex-ai | openai-compatible
       codexCli: {
         binPath: "",
         model: "gpt-5.3-codex",
@@ -150,6 +150,20 @@ function defaultConfig(defaultDocs = {}) {
           refreshToken: "",
           expiresAtMs: 0,
         },
+      },
+      vertexAi: {
+        projectId: "",
+        location: "global",
+        model: "google/gemini-2.5-flash",
+        authMode: "gcloud-cli",
+        accessToken: "",
+        gcloudPath: "",
+      },
+      openaiCompatible: {
+        baseUrl: "",
+        model: "gpt-4o-mini",
+        apiKey: "",
+        preferredApi: "auto",
       },
     },
     runtime: {
